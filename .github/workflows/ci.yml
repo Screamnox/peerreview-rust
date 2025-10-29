@@ -1,0 +1,41 @@
+name: Rust CI
+
+on:
+  push:
+  pull_request:
+
+env: 
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: Rust project - stable
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install and set stable Rust
+      # TODO: Add cache
+      - name: Setup Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy rustfmt
+
+      # Build
+      - name: Build
+        run: cargo build --verbose
+
+      # Run tests
+      - name: Test
+        run: cargo test --verbose
+
+      # Run Clippy (treat warnings as errors)
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Check code formatting
+      - name: Format Check
+        run: cargo fmt --all -- --check
+

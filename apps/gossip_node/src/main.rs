@@ -1,0 +1,339 @@
+use anyhow::Result;
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
+use clap::Parser;
+use common_proto::{Msg, MsgKind, NodeId};
+use dashmap::DashSet;
+use parking_lot::Mutex;
+use rand::{seq::SliceRandom, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
+use std::{collections::VecDeque, fs, net::SocketAddr, sync::Arc, time::Duration};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::mpsc,
+};
+
+// ----------------- CLI -----------------
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(long)]
+    config: String,
+    #[arg(long)]
+    cluster: String,
+}
+
+// ----------------- Config -----------------
+#[derive(Debug, Deserialize, Clone)]
+struct NodeCfg {
+    id: String,
+    listen_addr: String, // ex "0.0.0.0:7001"
+    heartbeat_ms: u64,
+    gossip_ms: u64,
+    anti_entropy_ms: u64,
+    http_api: u16, // ex 8081
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct Peer {
+    id: String,
+    addr: String, // ex "node3:7001" (docker) ou "127.0.0.1:7001" (local)
+}
+
+#[derive(Debug, Deserialize)]
+struct ClusterCfg {
+    nodes: Vec<Peer>,
+    fanout: usize,     // k
+    num_trees: usize,  // T
+}
+
+// ----------------- Etat du noeud -----------------
+#[derive(Clone)]
+struct NodeState {
+    my_id: NodeId,
+    // enfants par arbre: children_by_tree[t] = Vec<Peer>
+    children_by_tree: Arc<Vec<Vec<Peer>>>,
+    // anti-doublon: (tree_id, msg_id)
+    known_msgs: Arc<DashSet<(u8, String)>>,
+    inbox: Arc<Mutex<VecDeque<String>>>,
+    tx_send: mpsc::Sender<(Peer, Vec<u8>)>,
+}
+
+#[derive(Serialize)]
+struct Stats {
+    node_id: String,
+    known_count: usize,
+    last_msgs: Vec<String>,
+    trees: usize,
+}
+
+// ----------------- Utilitaires -----------------
+fn now_ms() -> u64 {
+    (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as u64
+}
+
+// ordre permuté déterministe des nœuds pour chaque arbre (seed fixe)
+fn make_orders(nodes: &[Peer], num_trees: usize) -> Vec<Vec<Peer>> {
+    let mut res = Vec::with_capacity(num_trees);
+    for t in 0..num_trees {
+        let mut v = nodes.to_vec();
+        let mut rng = ChaCha8Rng::seed_from_u64(0xD15EA5_EEDu64 ^ (t as u64));
+        v.as_mut_slice().shuffle(&mut rng);
+        res.push(v);
+    }
+    res
+}
+
+// enfants k-aires d'un noeud (id) dans un ordre donné
+fn kary_children(order: &[Peer], my_id: &str, k: usize) -> Vec<Peer> {
+    let n = order.len();
+    let i = order
+        .iter()
+        .position(|p| p.id == my_id)
+        .expect("current node id not found in order");
+    let mut v = Vec::new();
+    for j in 1..=k {
+        let idx = i * k + j;
+        if idx < n {
+            v.push(order[idx].clone());
+        }
+    }
+    v
+}
+
+// ----------------- HTTP Handlers -----------------
+#[derive(Deserialize)]
+struct PublishIn {
+    payload: String,
+}
+
+async fn stats(State(st): State<NodeState>) -> Json<Stats> {
+    let mut last = Vec::new();
+    {
+        let mut q = st.inbox.lock();
+        let take = q.len().min(10);
+        for _ in 0..take {
+            if let Some(s) = q.pop_back() {
+                last.push(s);
+            }
+        }
+        // remettre pour garder l'historique
+        for s in last.iter().rev() {
+            q.push_back(s.clone());
+        }
+    }
+    Json(Stats {
+        node_id: st.my_id.clone(),
+        known_count: st.known_msgs.len(),
+        last_msgs: last,
+        trees: st.children_by_tree.len(),
+    })
+}
+
+async fn publish(State(st): State<NodeState>, Json(input): Json<PublishIn>) -> Json<&'static str> {
+    // duplique le même message sur tous les arbres
+    for tt in 0u8..(st.children_by_tree.len() as u8) {
+        let msg = Msg {
+            id: uuid::Uuid::new_v4().to_string(),
+            from: st.my_id.clone(),
+            kind: MsgKind::Publish,
+            payload: input.payload.clone().into_bytes(),
+            ts_ms: now_ms(),
+            tree_id: tt,
+        };
+        // marquer connu localement + journal local minimal
+        st.known_msgs.insert((tt, msg.id.clone()));
+        {
+            let mut q = st.inbox.lock();
+            q.push_back(format!("(local t{}) {}", tt, String::from_utf8_lossy(&msg.payload)));
+            if q.len() > 200 {
+                q.pop_front();
+            }
+        }
+        let bytes = bincode::serialize(&msg).unwrap();
+        for p in st.children_by_tree[tt as usize].iter() {
+            let _ = st.tx_send.send((p.clone(), bytes.clone())).await;
+        }
+    }
+    Json("ok")
+}
+
+// ----------------- main -----------------
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+
+    eprintln!("CWD  = {:?}", std::env::current_dir().unwrap());
+    eprintln!("args = {:?}", std::env::args().collect::<Vec<_>>());
+    if std::fs::metadata(&args.config).is_err() {
+        eprintln!("❌ config introuvable: {}", &args.config);
+    }
+    if std::fs::metadata(&args.cluster).is_err() {
+        eprintln!("❌ cluster introuvable: {}", &args.cluster);
+    }
+
+    let node_cfg: NodeCfg = serde_yaml::from_str(&fs::read_to_string(&args.config)?)?;
+    let cluster_cfg: ClusterCfg = serde_yaml::from_str(&fs::read_to_string(&args.cluster)?)?;
+
+    // Paramètres multi-arbres
+    let k = cluster_cfg.fanout.max(1);
+    let t = cluster_cfg.num_trees.max(1);
+    let orders = make_orders(&cluster_cfg.nodes, t);
+    // Enfants par arbre pour CE noeud
+    let mut children_by_tree: Vec<Vec<Peer>> = Vec::with_capacity(t);
+    for ord in &orders {
+        children_by_tree.push(kary_children(ord, &node_cfg.id, k));
+    }
+    println!(
+        "{} children_by_tree = {:?}",
+        node_cfg.id,
+        children_by_tree
+            .iter()
+            .enumerate()
+            .map(|(ti, ch)| format!("t{}: {:?}", ti, ch.iter().map(|p| &p.id).collect::<Vec<_>>()))
+            .collect::<Vec<_>>()
+    );
+
+    // Listener TCP (messages binaires)
+    let listen: SocketAddr = node_cfg.listen_addr.parse()?;
+    let listener = TcpListener::bind(listen).await?;
+    println!("{} listening on TCP {}", node_cfg.id, listen);
+
+   // Canal d'envoi
+    let (tx, mut rx) = mpsc::channel::<(Peer, Vec<u8>)>(2048);
+
+    // Etat partagé
+    let st = NodeState {
+        my_id: node_cfg.id.clone(),
+        children_by_tree: Arc::new(children_by_tree),
+        known_msgs: Arc::new(DashSet::new()),
+        inbox: Arc::new(Mutex::new(VecDeque::new())),
+        tx_send: tx.clone(),
+    };
+
+    // Tâche d'envoi TCP (avec mini backoff au boot)
+    tokio::spawn(async move {
+        while let Some((peer, bytes)) = rx.recv().await {
+            match TcpStream::connect(&peer.addr).await {
+                Ok(mut s) => {
+                    let _ = s.write_all(&(bytes.len() as u32).to_be_bytes()).await;
+                    let _ = s.write_all(&bytes).await;
+                }
+                Err(_e) => {
+                    // au démarrage l'autre peut ne pas être prêt
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+            }
+        }
+    });
+
+    // Heartbeats par arbre (facultatif mais utile pour visualiser)
+    {
+        let stc = st.clone();
+        let period = node_cfg.heartbeat_ms;
+        tokio::spawn(async move {
+            let mut counter = 0u64;
+            // petite pause pour laisser les pairs démarrer
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            loop {
+                counter += 1;
+                for tt in 0u8..(stc.children_by_tree.len() as u8) {
+                    let msg = Msg {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        from: stc.my_id.clone(),
+                        kind: MsgKind::Heartbeat { counter, tree_id: tt },
+                        payload: vec![],
+                        ts_ms: now_ms(),
+                        tree_id: tt,
+                    };
+                    let bytes = bincode::serialize(&msg).unwrap();
+                    for p in stc.children_by_tree[tt as usize].iter() {
+                        let _ = stc.tx_send.send((p.clone(), bytes.clone())).await;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(period)).await;
+            }
+        });
+    }
+
+    // HTTP API
+    {
+        let http_addr = SocketAddr::from(([0, 0, 0, 0], node_cfg.http_api));
+        let router = Router::new()
+            .route("/stats", get(stats))
+            .route("/publish", post(publish))
+            .with_state(st.clone());
+        println!(
+            "{} HTTP on http://0.0.0.0:{}/",
+            node_cfg.id, node_cfg.http_api
+        );
+        tokio::spawn(async move {
+            let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
+            axum::serve(listener, router).await.unwrap();
+        });
+    }
+
+    // Réception TCP
+    loop {
+        let (mut sock, _addr) = listener.accept().await?;
+        let stc = st.clone();
+        tokio::spawn(async move {
+            loop {
+                let mut len_buf = [0u8; 4];
+                if sock.read_exact(&mut len_buf).await.is_err() {
+                    break;
+                }
+                let len = u32::from_be_bytes(len_buf) as usize;
+                let mut buf = vec![0u8; len];
+                if sock.read_exact(&mut buf).await.is_err() {
+                    break;
+                }
+                match bincode::deserialize::<Msg>(&buf) {
+                    Ok(msg) => {
+                        let key = (msg.tree_id, msg.id.clone());
+                        // dédoublon (tree_id, msg_id)
+                        if !stc.known_msgs.insert(key) {
+                            continue;
+                        }
+                        match &msg.kind {
+                            MsgKind::Heartbeat { counter, .. } => {
+                                println!(
+                                    "[{}] HB t{} #{} from {}",
+                                    stc.my_id, msg.tree_id, counter, msg.from
+                                );
+                                // pas de reforward obligatoire pour les HB
+                            }
+                            MsgKind::Publish => {
+                                // stocke un aperçu local
+                                let text =
+                                    String::from_utf8_lossy(&msg.payload).to_string();
+                                {
+                                    let mut q = stc.inbox.lock();
+                                    q.push_back(format!(
+                                        "(t{} from {}) {}",
+                                        msg.tree_id, msg.from, text
+                                    ));
+                                    if q.len() > 200 {
+                                        q.pop_front();
+                                    }
+                                }
+                                // forward aux enfants de CET arbre
+                                let bytes = bincode::serialize(&msg).unwrap();
+                                for p in stc.children_by_tree[msg.tree_id as usize].iter() {
+                                    if p.id != stc.my_id {
+                                        let _ = stc.tx_send.send((p.clone(), bytes.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("[{}] invalid msg: {}", stc.my_id, e),
+                }
+            }
+        });
+    }
+}

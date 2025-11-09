@@ -1,0 +1,6 @@
+id: "node2"
+listen_addr: "0.0.0.0:7002"
+heartbeat_ms: 1000
+gossip_ms: 800
+anti_entropy_ms: 3000
+http_api: 8082

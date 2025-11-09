@@ -1,0 +1,3 @@
+[workspace]
+members = ["apps/gossip_node","crates/common_proto"]
+resolver = "2"

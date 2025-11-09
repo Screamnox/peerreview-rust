@@ -1,0 +1,6 @@
+nodes:
+  - { id: "node1", addr: "node1:7001" }
+  - { id: "node2", addr: "node2:7001" }
+  - { id: "node3", addr: "node3:7001" }
+  - { id: "node4", addr: "node4:7001" }
+fanout: 2

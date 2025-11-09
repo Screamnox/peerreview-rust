@@ -1,0 +1,11 @@
+# Rust
+/target
+**/*.rs.bk
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Docker
+**/*.log

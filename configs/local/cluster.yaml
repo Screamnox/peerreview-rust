@@ -1,0 +1,4 @@
+nodes:
+  - { id: "node1", addr: "127.0.0.1:7001" }
+  - { id: "node2", addr: "127.0.0.1:7002" }
+fanout: 1

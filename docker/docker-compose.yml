@@ -1,0 +1,29 @@
+version: "3.9"
+services:
+  node1: &node
+    build: { context: .., dockerfile: docker/Dockerfile }
+    container_name: node1
+    command: ["--config","configs/docker/node1.yaml","--cluster","configs/docker/cluster.yaml"]
+    ports: ["8081:8081"]
+    networks: [ gossip_net ]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/stats"]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+  node2:  { <<: *node, container_name: node2,  command: ["--config","configs/docker/node2.yaml","--cluster","configs/docker/cluster.yaml"],  ports: ["8082:8082"] }
+  node3:  { <<: *node, container_name: node3,  command: ["--config","configs/docker/node3.yaml","--cluster","configs/docker/cluster.yaml"],  ports: ["8083:8083"] }
+  node4:  { <<: *node, container_name: node4,  command: ["--config","configs/docker/node4.yaml","--cluster","configs/docker/cluster.yaml"],  ports: ["8084:8084"] }
+  node5:  { <<: *node, container_name: node5,  command: ["--config","configs/docker/node5.yaml","--cluster","configs/docker/cluster.yaml"],  ports: ["8085:8085"] }
+  node6:  { <<: *node, container_name: node6,  command: ["--config","configs/docker/node6.yaml","--cluster","configs/docker/cluster.yaml"],  ports: ["8086:8086"] }
+  node7:  { <<: *node, container_name: node7,  command: ["--config","configs/docker/node7.yaml","--cluster","configs/docker/cluster.yaml"],  ports: ["8087:8087"] }
+  node8:  { <<: *node, container_name: node8,  command: ["--config","configs/docker/node8.yaml","--cluster","configs/docker/cluster.yaml"],  ports: ["8088:8088"] }
+  node9:  { <<: *node, container_name: node9,  command: ["--config","configs/docker/node9.yaml","--cluster","configs/docker/cluster.yaml"],  ports: ["8089:8089"] }
+  node10: { <<: *node, container_name: node10, command: ["--config","configs/docker/node10.yaml","--cluster","configs/docker/cluster.yaml"], ports: ["8090:8090"] }
+
+networks:
+  gossip_net: { driver: bridge }
+
+

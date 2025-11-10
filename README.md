@@ -187,8 +187,3 @@ cargo clippy	Analyse statique du code
     ⚡ Sprint 3 :
     Monitoring distribué, tolérance aux fautes, scénario d’évaluation.
 
-👥 Auteurs
-
-    Samy Maach — Développement du système distribué, orchestration Docker, intégration réseau.
-
-    Équipe PeerReview-RS — Protocoles de vérification, log sécurisé, audit distribué.

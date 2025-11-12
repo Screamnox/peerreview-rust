@@ -12,7 +12,7 @@ L’objectif de ce module est :
 
 ---
 
-## 🚀 Fonctionnalités principales
+##  Fonctionnalités principales
 
 | Fonctionnalité | Description |
 |----------------|-------------|
@@ -47,7 +47,7 @@ peerreview-rs/
 
 ---
 
-## ⚙️ Prérequis
+##  Prérequis
 
 | Logiciel | Version minimale |
 |-----------|------------------|
@@ -94,7 +94,7 @@ curl localhost:8082/stats
 
     Les messages publiés par l’un sont reçus par l’autre.
 
-🐳 Lancement Dockerisé (jusqu’à 10 nœuds)
+ Lancement Dockerisé (jusqu’à 10 nœuds)
 
 1️⃣ Construire et lancer le cluster :
 
@@ -160,13 +160,7 @@ pub enum MsgKind {
     Payload { data: String, tree_id: String },
 }
 
-🔄 Workflow de développement (équipe)
-Étape	Responsable	Outil / Commande
-Dev local	Tous	cargo run -p gossip_node
-Tests intégration	Tous	docker compose up
-CI / Lint	Automatique	via GitHub Actions
-Ajout protocoles PeerReview	Autres binômes	Import via API commune
-Synchronisation	Samy (app distrib.) + équipe	Revue de code + intégration
+
 🧰 Commandes utiles
 Commande	Description
 ./scripts/up.sh	Démarre les 10 nœuds Docker

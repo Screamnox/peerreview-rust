@@ -1,6 +1,6 @@
-# 🕸️ PeerReview-RS — Application distribuée (Rust + Docker)
+#  PeerReview-RS — Application distribuée (Rust + Docker)
 
-## 📘 Contexte
+## Contexte
 Ce dépôt constitue la base **distribuée** du projet *PeerReview-RS*.
 Il s’agit d’une infrastructure de **communication pair-à-pair (P2P)** sur laquelle
 les protocoles PeerReview seront intégrés ultérieurement.

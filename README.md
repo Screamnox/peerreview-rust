@@ -1,94 +1,123 @@
-PeerReview-Rust — Infrastructure distribuée multi-arbres (10 nœuds)
+PeerReview-Rust
 
-Ce projet implémente la base d’un système distribué en Rust servant de socle pour l’intégration du protocole PeerReview.
-Il fournit :
+Infrastructure distribuée multi-arbres pour l’intégration de PeerReview
 
-✔️ une topologie multi-arbres configurable,
+Table of Contents
 
-✔️ un réseau TCP efficace pour la communication P2P,
+Introduction
 
-✔️ une API HTTP simple pour publier des messages et superviser les nœuds,
+Objectifs du projet
 
-✔️ un cluster de 10 nœuds Docker entièrement automatisé,
+Architecture générale
 
-✔️ la propagation distribuée des messages avec déduplication,
+Topologie multi-arbres
 
-✔️ une architecture prête pour PeerReview : journaux sécurisés, audits, preuves.
+Communication interne (TCP)
 
-Ce README explique ce que nous avons, ce que nous pouvons faire, et pourquoi.
+API HTTP
 
-🧠 1. Motivation & Objectif
+Structure du dépôt
 
-Le protocole PeerReview (Haeblerlen et al., SOSP’07) impose une infrastructure distribuée :
+Fonctionnalités actuelles
 
-capable de diffuser des messages à tous les nœuds,
+Démos possibles
 
-détecter les incohérences,
+Lien avec PeerReview
 
-empêcher la falsification des logs,
+Conclusion
 
-fournir des preuves d’intégrité.
+1. Introduction
 
-Notre but :
+Ce projet implémente une infrastructure distribuée en Rust destinée à servir de base au protocole PeerReview (Haeberlen et al., SOSP 2007).
+Il repose sur :
 
-Construire une base distribuée fiable qui servira de support direct pour PeerReview.
+une diffusion structurée en plusieurs arbres (multi-tree),
 
-Le présent système représente la première brique, sur laquelle la mécanique d’audit et de vérification sera rajoutée.
+un réseau TCP interne léger et performant,
 
-🏗️ 2. Architecture globale
+une API HTTP simplifiée pour les interactions extérieures,
 
-Chaque nœud Rust exécute :
+une configuration flexible via YAML,
 
-un serveur TCP (communication interne entre nœuds),
+un cluster Docker reproductible à 10 nœuds.
 
-un serveur HTTP (API externe : publish + stats),
+L’objectif est de disposer d’un environnement distribué cohérent, sur lequel les mécanismes PeerReview pourront être implémentés : journaux sécurisés, audits, détection de comportements fautifs, preuves cryptographiques.
 
-un moteur de diffusion multi-arbres,
+2. Objectifs du projet
 
-des tasks périodiques (heartbeats),
+Le projet vise à fournir :
 
-des structures de déduplication pour éviter les boucles.
+une topologie distribuée stable et configurable ;
 
-Autour de ça :
+des canaux de diffusion multiples pour la résilience et la performance ;
 
-un cluster Docker 10 nœuds,
+un protocole P2P clair et extensible ;
 
-des configurations YAML flexibles,
+une base technique pour intégrer PeerReview.
 
-un protocole de message commun (via common_proto).
+Le système actuel constitue la couche réseau et topologique du futur PeerReview.
 
-🌳 3. La Topologie Multi-Arbres
-3.1 Pourquoi des arbres multiples ?
+3. Architecture générale
 
-Les multi-arbres permettent :
+Chaque nœud exécute :
 
-meilleure résilience (si un arbre “meurt”, d’autres continuent),
+un serveur TCP : communication P2P interne ;
 
-répartition de charge lors de la diffusion,
+un serveur HTTP : interactions externes (publish, stats) ;
 
-des canaux logiques indépendants (essentiel pour PeerReview),
+un moteur de diffusion multi-arbres ;
 
-des chemins distincts pour relayer des preuves.
+des tâches périodiques (heartbeats) ;
 
-3.2 Construction des arbres
+un module de déduplication (évite les boucles et répétitions).
 
-À partir du cluster.yaml :
+Le cluster entier est orchestré via Docker Compose, permettant un déploiement reproductible à 10 nœuds.
 
-mélange aléatoire des nœuds → ordre aléatoire par arbre,
+Chaque nœud est entièrement autonome : pas de coordinateur central.
 
-construction d’un arbre k-aire selon fanout,
+4. Topologie multi-arbres
+4.1. Motivation
 
-chaque nœud ne connaît que ses enfants dans chaque arbre.
+Le système repose sur plusieurs arbres de diffusion pour :
 
-Chaque nœud stocke :
+améliorer la résilience (un arbre peut tomber) ;
+
+répartir la charge ;
+
+fournir des chemins logiques distincts, nécessaires aux futures opérations PeerReview ;
+
+limiter la congestion d’un seul arbre.
+
+4.2. Construction des arbres
+
+La topologie est dérivée de cluster.yaml, qui contient :
+
+la liste des nœuds,
+
+le nombre d'arbres (num_trees),
+
+le facteur de branchement (fanout).
+
+Pour chaque arbre :
+
+Un ordre aléatoire de tous les nœuds est généré.
+
+Cet ordre est transformé en arbre k-aire selon le fanout.
+
+Chaque nœud ne connaît que ses propres enfants pour cet arbre.
+
+Un nœud possède donc une structure :
 
 children_by_tree = {
-  0: [childA, childB, ...],
-  1: [childC, childD, ...],
-  2: [...]
+  0: [child1, child2, ...],
+  1: [childA, childB, ...],
+  ...
 }
 
-3.3 Configuration simple (YAML)
+4.3. Configuration
+
+Dans configs/docker/cluster.yaml :
+
 fanout: 3
 num_trees: 3
 
@@ -98,21 +127,14 @@ nodes:
   ...
 
 
-En modifiant fanout et num_trees, vous changez toute la topologie.
+Modifier fanout ou num_trees régénère entièrement la topologie.
 
-🔗 4. Communication interne (TCP)
+5. Communication interne (TCP)
 
-Chaque nœud :
+Les nœuds communiquent en TCP avec un protocole binaire léger basé sur bincode.
+Chaque message est une structure partagée définie dans crates/common_proto.
 
-écoute en TCP,
-
-se connecte aux autres nœuds si besoin,
-
-échange des messages sérialisés avec bincode,
-
-applique une déduplication (tree_id, msg_id).
-
-Les messages (common_proto) :
+Message type :
 
 enum MsgKind {
     Heartbeat { counter: u64, tree_id: u8 },
@@ -120,134 +142,117 @@ enum MsgKind {
 }
 
 
-Chaque message porte :
+Chaque message inclut :
 
-un UUID,
+un identifiant unique (UUID),
 
-l’auteur,
+l’émetteur,
 
-le tree_id,
+un identifiant d’arbre (tree_id),
 
-le payload.
+un payload optionnel,
 
-🌐 5. API HTTP externe
+un timestamp.
 
-Exposée par Axum :
+La déduplication (tree_id, msg_id) empêche toute retransmission cyclique.
 
-POST /publish
+6. API HTTP
 
-Injecte un message dans le système (un par arbre).
+Une API REST minimale expose deux routes :
+
+6.1. POST /publish
+
+Injecte un message dans le système.
+Pour chaque arbre, un message est généré et diffusé vers les enfants du nœud.
+
+Exemple :
 
 curl -X POST http://localhost:8083/publish \
      -H "Content-Type: application/json" \
      -d '{"payload":"Hello"}'
 
-GET /stats
+6.2. GET /stats
 
-Retourne l’état du nœud :
+Affiche l’état interne du nœud, notamment :
 
-{
-  "node_id": "node5",
-  "known_count": 42,
-  "last_msgs": [
-    "(t1 from node3) Hello"
-  ],
-  "trees": 3
-}
+le nombre de messages distincts reçus,
 
-📦 6. Structure du Répertoire
+les derniers messages,
+
+le nombre d’arbres.
+
+7. Structure du dépôt
 peerreview-rust/
 │
 ├─ crates/
-│   ├─ common_proto/      # Format des messages TCP
-│   └─ lib/               # Proto riche (Ihave/Request/Batch) pour PeerReview
+│   ├─ common_proto/       # Format des messages TCP
+│   └─ lib/                # Extension du protocole (Ihave/Request/Batch)
 │
-├─ gossip_node/           # Binaire principal
+├─ gossip_node/            # Binaire du nœud distribué
 │   └─ src/
-│        ├─ main.rs       # Point d'entrée, topologie, services
+│        ├─ main.rs        # Point d'entrée et logique principale
 │        └─ ...
 │
 ├─ configs/
-│   ├─ docker/            # Configs 10 nœuds Docker
-│   └─ local/             # Configs 2 nœuds local
+│   ├─ docker/             # Configurations des 10 nœuds Docker
+│   └─ local/              # Configurations pour tests locaux
 │
 ├─ docker/
-│   └─ Dockerfile         # Build de l’image
+│   └─ Dockerfile          # Construction de l’image
 │
 ├─ scripts/
-│   ├─ gen_10nodes.sh     # Génère les configs Docker
-│   └─ up.sh              # Build + run du cluster
+│   ├─ gen_10nodes.sh      # Génération automatique des configs Docker
+│   └─ up.sh               # Construction et lancement du cluster
 │
 └─ README.md
 
-🚀 7. Ce que le système sait faire maintenant
-✔️ Diffusion distribuée multi-arbres
+8. Fonctionnalités actuelles
 
-Chaque Publish est diffusé sur tous les arbres.
+Diffusion distribuée via plusieurs arbres.
 
-✔️ Communication P2P performante (TCP)
+Communication interne TCP performante, binaire et compacte.
 
-Bincode = faible overhead.
+API HTTP simple pour tester, superviser et interagir avec un nœud.
 
-✔️ API HTTP simple
+Déduplication robuste contre les boucles.
 
-Pour injecter des messages & observer l’état.
+Heartbeats périodiques pour chaque arbre.
 
-✔️ Déduplication robuste
+Déploiement automatisé d’un cluster 10 nœuds via Docker.
 
-Empêche toute boucle potentielle.
+Paramétrage complet via YAML.
 
-✔️ Heartbeats réguliers
+9. Démos possibles
 
-Chaque nœud signale sa présence dans chaque arbre.
+Ces démonstrations peuvent être effectuées en quelques commandes.
 
-✔️ Cluster complet en 1 commande
+9.1. Diffusion globale d'un message
 
-./scripts/up.sh
+Publier depuis un nœud :
 
-🎮 8. Demos possibles
-
-Ces démonstrations montrent l’efficacité et la stabilité de votre architecture.
-
-🎯 DEMO 1 – Diffusion globale d’un message
-
-Publier sur un nœud et voir la réception sur tous les autres.
-
-Publier depuis node3
 curl -X POST http://localhost:8083/publish \
   -H "Content-Type: application/json" \
   -d '{"payload":"Hello world"}'
 
-Vérifier sur d'autres nœuds
+
+Observer sur d’autres nœuds :
+
 curl http://localhost:8081/stats
 curl http://localhost:8085/stats
 curl http://localhost:8089/stats
 
-
-Résultat :
-Le message apparaît sur les 10 nœuds, dans les différents arbres (t0, t1, t2).
-
-🎯 DEMO 2 – Publier depuis n’importe quel nœud
-
-Montre que la diffusion fonctionne quelle que soit la racine d’injection.
-
-Publier depuis node7
+9.2. Publication depuis n'importe quel nœud
 curl -X POST http://localhost:8087/publish \
   -H "Content-Type: application/json" \
   -d '{"payload":"From node7"}'
 
-Vérifier sur d'autres nœuds
+
+Vérification :
+
 curl http://localhost:8082/stats
 curl http://localhost:80810/stats
 
-
-Résultat :
-Tous les nœuds reçoivent le message sans duplication.
-
-🎯 DEMO 3 – Charge & scalabilité
-
-Envoi de 20 messages rapides → démontre la stabilité et la déduplication.
-
+9.3. Envoi intensif de messages
 for i in $(seq 1 20); do
   curl -s -X POST http://localhost:8084/publish \
     -H "Content-Type: application/json" \
@@ -255,54 +260,51 @@ for i in $(seq 1 20); do
 done
 
 
-Puis :
+Vérification :
 
 curl http://localhost:8081/stats
 
 
-Résultat :
+Ces tests montrent :
 
-aucune duplication,
+pas de duplication,
 
-les derniers messages sont visibles,
+propagation rapide,
 
-la propagation reste fluide.
+stabilité du système.
 
-🔮 9. Lien avec PeerReview
+10. Lien avec PeerReview
 
-Votre infrastructure fournit tout le nécessaire pour intégrer PeerReview :
+L’objectif final est de transformer ce système en une implémentation complète du protocole PeerReview.
 
-overlay multi-arbres → plusieurs canaux de propagation,
+Le système actuel fournit déjà les briques essentielles :
 
-communication fiable → messages binaires + déduplication,
+overlay structuré multi-arbres,
 
-heartbeats → utiles pour les audits,
+communication fiable et déterministe,
 
-structuration claire → nœuds indépendants mais synchronisés,
+propagation contrôlée,
 
-proto extensible (lib.rs) → ajouté pour supporter Ihave / Request / Batch.
+mécanisme de déduplication,
 
-Le prochain travail consistera à :
+transport léger,
 
-enregistrer tous les messages dans un log inviolable,
+protocole extensible (Ihave, Request, Batch déjà définis).
 
-produire des preuves cryptographiques,
+Les prochaines étapes incluent :
 
-échanger des IHave / Request / Batch pour vérifier les pairs,
+journaux sécurisés (tamper-evident logs),
 
-détecter les nœuds malhonnêtes.
+hachage chaîné,
 
-Votre système est déjà une version simplifiée d’un vrai état de PeerReview, avec le cœur réseau fonctionnel.
+audits pair-à-pair,
 
-🏁 10. Conclusion
+vérification des écarts de comportement,
 
-Ce projet fournit une infrastructure distribuée complète, en Rust, multi-nœuds, multi-arbres et prête pour PeerReview.
-C’est une base solide pour expérimenter :
+preuves cryptographiques de faute.
 
-la diffusion distribuée,
+11. Conclusion
 
-les protocoles de vérification,
-
-les mécanismes d’audit et de preuve.
-
-Vous disposez maintenant d’un vrai cluster distribué, contrôlable, configurable, efficace et extensible.
+Ce projet constitue une base solide pour la mise en œuvre du protocole PeerReview.
+Il propose une infrastructure distribuée réaliste, configurable, performante et extensible.
+Le cluster multi-arbres, la communication TCP, l’API HTTP et les mécanismes internes en font une plateforme prête à accueillir les étapes suivantes : logs sécurisés, audits et vérification comportementale.

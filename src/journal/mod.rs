@@ -1,6 +1,6 @@
+use base64::{Engine as _, engine::general_purpose};
+use rusqlite::{Connection, params};
 use thiserror::Error;
-use base64::{engine::general_purpose, Engine as _};
-use rusqlite::{params, Connection};
 
 /// Message type: SEND or RECV
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,11 +80,8 @@ impl Logger {
     /// Request Option<i64> from the row to differentiate NULL vs value.
     fn recover_sequence(conn: &Connection) -> Result<u64> {
         // Get Option<i64> because MAX(seq) returns NULL when no rows exist.
-        let max_seq_opt: Option<i64> = conn.query_row(
-            "SELECT MAX(seq) FROM logs",
-            [],
-            |row| row.get(0),
-        )?;
+        let max_seq_opt: Option<i64> =
+            conn.query_row("SELECT MAX(seq) FROM logs", [], |row| row.get(0))?;
 
         let next = match max_seq_opt {
             None => 0u64,
@@ -188,4 +185,3 @@ impl Logger {
         Ok(())
     }
 }
-

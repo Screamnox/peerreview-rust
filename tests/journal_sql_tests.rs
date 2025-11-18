@@ -1,9 +1,9 @@
+use base64::{Engine as _, engine::general_purpose};
 use std::fs;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
-use base64::{engine::general_purpose, Engine as _};
 
-use peerreview::journal::{Logger, MessageType, LogError};
+use peerreview::journal::{LogError, Logger, MessageType};
 
 // Helper: create a logger with a tempfile path
 fn create_logger_with_max(max_lines: u64) -> (Logger, PathBuf) {
@@ -44,7 +44,9 @@ fn test_recover_sequence_after_existing_rows() {
 #[test]
 fn test_log_base64_and_read_range_basic() {
     let (mut logger, path) = create_logger_with_max(10);
-    let seq = logger.log(MessageType::Send, 42, "some payload").expect("log");
+    let seq = logger
+        .log(MessageType::Send, 42, "some payload")
+        .expect("log");
     assert_eq!(seq, 0);
 
     let entries = logger.read_range(0, 0).expect("read_range");
@@ -67,7 +69,9 @@ fn test_logging_wraparound_overwrites_old_entries() {
     // write 5 entries; positions: 0,1,2,0,1
     for i in 0..5 {
         let payload = format!("m{}", i);
-        let seq = logger.log(MessageType::Send, i as u32, &payload).expect("log");
+        let seq = logger
+            .log(MessageType::Send, i as u32, &payload)
+            .expect("log");
         assert_eq!(seq, i);
     }
 
@@ -100,7 +104,17 @@ fn test_read_range_ordering_and_subrange() {
     let (mut logger, path) = create_logger_with_max(10);
     for i in 0..6 {
         let payload = format!("v{}", i);
-        logger.log(if i % 2 == 0 { MessageType::Send } else { MessageType::Recv }, i as u32, &payload).expect("log");
+        logger
+            .log(
+                if i % 2 == 0 {
+                    MessageType::Send
+                } else {
+                    MessageType::Recv
+                },
+                i as u32,
+                &payload,
+            )
+            .expect("log");
     }
 
     // subrange 2..4
@@ -125,7 +139,7 @@ fn test_invalid_message_type_in_db_yields_error() {
 
     let res = logger.read_range(0, 0);
     match res {
-        Err(LogError::InvalidMessageType(9)) => {},
+        Err(LogError::InvalidMessageType(9)) => {}
         Err(e) => panic!("expected InvalidMessageType(9), got other error: {:?}", e),
         Ok(v) => panic!("expected error, got ok: {:?}", v),
     }
@@ -144,7 +158,7 @@ fn test_base64_decode_error_propagated() {
 
     let res = logger.read_range(0, 0);
     match res {
-        Err(LogError::Base64(_)) => {},
+        Err(LogError::Base64(_)) => {}
         Err(e) => panic!("expected Base64 error, got {:?}", e),
         Ok(v) => panic!("expected error, got ok: {:?}", v),
     }
@@ -165,7 +179,7 @@ fn test_utf8_decode_error_propagated() {
 
     let res = logger.read_range(0, 0);
     match res {
-        Err(LogError::Utf8(_)) => {},
+        Err(LogError::Utf8(_)) => {}
         Err(e) => panic!("expected Utf8 error, got {:?}", e),
         Ok(v) => panic!("expected error, got ok: {:?}", v),
     }
@@ -178,7 +192,9 @@ fn test_seq_next_sequence_consistency_after_many_logs() {
     let (mut logger, path) = create_logger_with_max(7);
     for i in 0..100 {
         let payload = format!("data{}", i);
-        logger.log(MessageType::Send, i as u32, &payload).expect("log");
+        logger
+            .log(MessageType::Send, i as u32, &payload)
+            .expect("log");
         assert_eq!(logger.next_sequence(), (i + 1) as u64);
     }
     fs::remove_file(path).ok();
@@ -249,9 +265,8 @@ fn test_new_with_invalid_path_returns_sql_error() {
     let path = "/this/path/should/not/exist/and/be/a_dir";
     let res = Logger::new(path, 5);
     match res {
-        Err(LogError::Sql(_)) => {},
+        Err(LogError::Sql(_)) => {}
         Ok(_) => panic!("expected SQL error for invalid path"),
         Err(e) => panic!("unexpected error: {:?}", e),
     }
 }
-

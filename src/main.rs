@@ -1,5 +1,4 @@
 mod journal;
-
 use journal::LogType;
 use journal::Logger;
 

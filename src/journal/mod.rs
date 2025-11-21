@@ -14,8 +14,8 @@ use base64::Engine;
 #[derive(Debug)]
 #[repr(u8)]
 pub enum LogType {
-    SEND = 0,
-    RECV = 1,
+    Send = 0,
+    Recv = 1,
 }
 
 /// Structure d’une entrée du journal
@@ -34,13 +34,13 @@ impl LogEntry {
     /// Format: s_k;log_type;dest;hash_hex;sig_hex;msg_base64
     pub fn serialize(log_entry: LogEntry) -> String {
         let log_type_val = match log_entry.log_type {
-            LogType::SEND => 0u8,
-            LogType::RECV => 1u8,
+            LogType::Send => 0u8,
+            LogType::Recv => 1u8,
         };
         
         // Convertir les arrays de bytes en hex
-        let hash_hex = hex::encode(&log_entry.hash);
-        let sig_hex = hex::encode(&log_entry.sig);
+        let hash_hex = hex::encode(log_entry.hash);
+        let sig_hex = hex::encode(log_entry.sig);
         
         // Convertir le message en base64
         let msg_base64 = STANDARD.encode(&log_entry.msg);
@@ -85,8 +85,8 @@ impl LogEntry {
             )
         })?;
         let log_type = match log_type_val {
-            0 => LogType::SEND,
-            1 => LogType::RECV,
+            0 => LogType::Send,
+            1 => LogType::Recv,
             _ => return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "log_type doit être 0 ou 1",
@@ -179,7 +179,7 @@ impl Logger {
             if line_result.unwrap().matches(';').count() as u8 != nb_semicol {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("Mauvais nombre de ';'"),
+                    "Mauvais nombre de ';'",
                 ));
             }
         }
@@ -187,7 +187,7 @@ impl Logger {
         if nb_line_reader != line_max {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Le nombre de ligne du fichier de log existant et le nombre de ligne indiqué ne correspondent pas")
+                "Le nombre de ligne du fichier de log existant et le nombre de ligne indiqué ne correspondent pas"
             ));
         }
         

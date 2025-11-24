@@ -150,14 +150,44 @@ impl Logger {
 
         replace_line_at_position(&mut self.file, self.line_current, &entry)?;
 
-        let out: LogEntry = LogEntry::deserialize(&entry)?;
+        let _out: LogEntry = LogEntry::deserialize(&entry)?;
 
-        println!(
+        /*println!(
             "LogEntry:\n  s_k: {}\n  log_type: {:?}\n  dest: {}\n  hash: {:?}\n  sig: {:?}\n  msg: {}",
             out.s_k, out.log_type, out.dest, out.hash, out.sig, out.msg
-        );
+        );*/
 
         self.line_current += 1;
         Ok(())
+    }
+
+    ///Cette fonction a pour objectif de renvoyer le nombre de log demandé passé en paramètre du plus récent au plus ancien (trié par s_k)
+    pub fn get_log(self, mut nb_log: usize) -> std::io::Result<Vec<LogEntry>> {
+        let mut reader = BufReader::new(self.file);
+        reader.seek(SeekFrom::Start(0))?;
+        let mut count: usize = 0;
+        let mut id: usize = self.line_current - 1;
+        let lines = reader.lines().collect::<Result<Vec<String>, _>>()?;
+        nb_log = nb_log.min(lines.len());
+        let mut result = Vec::with_capacity(nb_log);
+
+        while count < nb_log {
+            match LogEntry::deserialize(&lines[id]) {
+                Ok(entry) => result.push(entry),
+                Err(_) => {
+                    println!(
+                        "get_log : Format de ligne incorrect !, Vec<LogEntry> retourné avec les précédentes valeurs"
+                    );
+                    break;
+                }
+            }
+            if id == 0 {
+                id += lines.len() - 1;
+            } else {
+                id -= 1;
+            }
+            count += 1;
+        }
+        Ok(result)
     }
 }

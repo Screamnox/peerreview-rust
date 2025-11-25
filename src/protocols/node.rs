@@ -1,10 +1,11 @@
 use crate::journal::Logger;
 
-/// Type de message : SEND ou RECV
+/// Type de message : Send ou Recv
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub enum MessageType {
-    SEND,
-    RECV,
+    Send,
+    Recv,
 }
 
 /// Structure d'un message PeerReview transmis sur le réseau
@@ -12,8 +13,10 @@ pub enum MessageType {
 pub struct PeerReviewMessage {
     pub msg_type: MessageType,
     pub seq_num: usize,          // sk
+    #[allow(dead_code)]
     pub prev_hash: [u8; 32],     // hk-1
     pub signature: [u8; 32],     // αk (signature MAC)
+    #[allow(dead_code)]
     pub dest: u32,               // Destinataire
     pub payload: String,         // Message m
 }
@@ -23,6 +26,7 @@ pub struct PeerReviewNode {
     pub node_id: u32,
     pub logger: Logger,
     pub prev_hash: [u8; 32],       // Hash de l'entrée précédente (hk-1)
+    #[allow(dead_code)]
     pub private_key: [u8; 32],     // Clé privée pour signature MAC
 }
 

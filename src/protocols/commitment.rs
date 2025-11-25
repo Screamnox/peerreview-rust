@@ -31,7 +31,7 @@ impl PeerReviewNode {
         
         // Étape 2-3: Créer le message SEND à envoyer = {sk, hk-1, αk, m}
         let send_msg = PeerReviewMessage {
-            msg_type: MessageType::SEND,
+            msg_type: MessageType::Send,
             seq_num: log_entry.s_k,
             prev_hash: prev_hash_for_msg,  // hk-1 (hash précédent)
             signature: log_entry.sig,       // αk depuis le journal
@@ -54,7 +54,7 @@ impl PeerReviewNode {
         _sender_public_key: &[u8; 32],
     ) -> bool {
         // Vérifier seulement le type de message pour l'instant
-        if msg.msg_type != MessageType::SEND {
+        if msg.msg_type != MessageType::Send {
             println!("[Nœud {}] Erreur: Type de message incorrect (attendu SEND)", self.node_id);
             return false;
         }
@@ -103,7 +103,7 @@ impl PeerReviewNode {
 
         // Étape 7: Créer le message SEND (acquittement) = {sl+1, hl, αl+1}
         let ack_msg = PeerReviewMessage {
-            msg_type: MessageType::SEND,
+            msg_type: MessageType::Send,
             seq_num: log_entry_ack.s_k,
             prev_hash: log_entry_recv.hash,  // hl (hash de l'entrée RECV)
             signature: log_entry_ack.sig,    // αl+1 depuis le journal
@@ -128,7 +128,7 @@ impl PeerReviewNode {
         _original_message: &str,
     ) -> bool {
         // Vérifier seulement le type de message pour l'instant
-        if ack_msg.msg_type != MessageType::SEND {
+        if ack_msg.msg_type != MessageType::Send {
             println!("[Nœud {}] Erreur: Type de message incorrect (attendu SEND pour acquittement)", 
                      self.node_id);
             return false;

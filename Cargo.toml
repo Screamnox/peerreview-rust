@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 hex = "0.4"
 base64 = "0.22"
+sha2 = "0.10"

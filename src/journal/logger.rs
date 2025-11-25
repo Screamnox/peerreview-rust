@@ -150,58 +150,46 @@ impl Logger {
 
         replace_line_at_position(&mut self.file, self.line_current, &entry)?;
 
-        println!(
+        let _out: LogEntry = LogEntry::deserialize(&entry)?;
+
+        /*println!(
             "LogEntry:\n  s_k: {}\n  log_type: {:?}\n  dest: {}\n  hash: {:?}\n  sig: {:?}\n  msg: {}",
             self.s_k, entry_type, destinataire, hash, sig, msg
         );
+            out.s_k, out.log_type, out.dest, out.hash, out.sig, out.msg
+        );*/
 
         self.line_current += 1;
         Ok(())
     }
 
-    /// Récupère les n dernières entrées de log
-    /// Retourne un Vec<LogEntry> avec les n dernières entrées
-    pub fn get_log(&mut self, n: usize) -> std::io::Result<Vec<LogEntry>> {
-        let mut logs = Vec::new();
-        
-        // Se positionner au début du fichier
-        self.file.seek(SeekFrom::Start(0))?;
-        let reader = BufReader::new(&self.file);
-        
-        // Lire toutes les lignes
-        let mut all_entries = Vec::new();
-        for line_result in reader.lines() {
-            let line = line_result?;
-            // Ignorer les lignes vides ou qui contiennent uniquement des séparateurs
-            if line.trim().is_empty() || line.trim().chars().all(|c| c == ';' || c == ' ') {
-                continue;
+    ///Cette fonction a pour objectif de renvoyer le nombre de log demandé passé en paramètre du plus récent au plus ancien (trié par s_k)
+    pub fn get_log(self, mut nb_log: usize) -> std::io::Result<Vec<LogEntry>> {
+        let mut reader = BufReader::new(self.file);
+        reader.seek(SeekFrom::Start(0))?;
+        let mut count: usize = 0;
+        let mut id: usize = self.line_current - 1;
+        let lines = reader.lines().collect::<Result<Vec<String>, _>>()?;
+        nb_log = nb_log.min(lines.len());
+        let mut result = Vec::with_capacity(nb_log);
+
+        while count < nb_log {
+            match LogEntry::deserialize(&lines[id]) {
+                Ok(entry) => result.push(entry),
+                Err(_) => {
+                    println!(
+                        "get_log : Format de ligne incorrect !, Vec<LogEntry> retourné avec les précédentes valeurs"
+                    );
+                    break;
+                }
             }
-            
-            // Désérialiser l'entrée
-            match LogEntry::deserialize(&line) {
-                Ok(entry) => all_entries.push(entry),
-                Err(_) => continue, // Ignorer les lignes invalides
+            if id == 0 {
+                id += lines.len() - 1;
+            } else {
+                id -= 1;
             }
+            count += 1;
         }
-        
-        // Prendre les n dernières entrées
-        let start_index = if all_entries.len() > n {
-            all_entries.len() - n
-        } else {
-            0
-        };
-        
-        for entry in all_entries.into_iter().skip(start_index) {
-            logs.push(entry);
-        }
-        
-        if logs.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "Aucune entrée de log trouvée",
-            ));
-        }
-        
-        Ok(logs)
+        Ok(result)
     }
 }

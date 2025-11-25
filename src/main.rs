@@ -83,5 +83,11 @@ fn main() -> std::io::Result<()> {
     }
 
     println!("=== Démonstration terminée ===");
+
+    // Test de get_log() de la branche journal
+    let test_logger = Logger::new("journal.log", 10, 200)?;
+    let result = test_logger.get_log(100)?;
+    println!("\nTest get_log - Taille : {}", result.len());
+
     Ok(())
 }

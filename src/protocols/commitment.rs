@@ -185,8 +185,8 @@ impl PeerReviewNode {
         let logs = self.logger.get_log(1)?;
         self.prev_hash = logs[0].hash;
         
-        println!("[Nœud {}] Challenge d'envoi créé pour le nœud {} : {}", 
-                 self.node_id, receiver_id, "Timeout - pas d'acquittement");
+        println!("[Nœud {}] Challenge d'envoi créé pour le nœud {} : Timeout - pas d'acquittement", 
+                 self.node_id, receiver_id);
 
         Ok(false)
     }

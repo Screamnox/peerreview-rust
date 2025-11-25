@@ -8,7 +8,7 @@ use super::file_utils::replace_line_at_position;
 
 /// Journaliseur : écrit les entrées dans un fichier texte
 pub struct Logger {
-    s_k: usize,
+    pub s_k: usize,
     line_max: usize,
     line_current: usize,
     file: File,
@@ -112,7 +112,7 @@ impl Logger {
         })
     }
 
-    /// Ajoute une entrée au journal
+    /// Ajoute une entrée au journal et retourne la ligne sérialisée
     pub fn log(
         &mut self,
         entry_type: LogType,
@@ -150,14 +150,58 @@ impl Logger {
 
         replace_line_at_position(&mut self.file, self.line_current, &entry)?;
 
-        let out: LogEntry = LogEntry::deserialize(&entry)?;
-
         println!(
             "LogEntry:\n  s_k: {}\n  log_type: {:?}\n  dest: {}\n  hash: {:?}\n  sig: {:?}\n  msg: {}",
-            out.s_k, out.log_type, out.dest, out.hash, out.sig, out.msg
+            self.s_k, entry_type, destinataire, hash, sig, msg
         );
 
         self.line_current += 1;
         Ok(())
+    }
+
+    /// Récupère les n dernières entrées de log
+    /// Retourne un Vec<LogEntry> avec les n dernières entrées
+    pub fn get_log(&mut self, n: usize) -> std::io::Result<Vec<LogEntry>> {
+        let mut logs = Vec::new();
+        
+        // Se positionner au début du fichier
+        self.file.seek(SeekFrom::Start(0))?;
+        let reader = BufReader::new(&self.file);
+        
+        // Lire toutes les lignes
+        let mut all_entries = Vec::new();
+        for line_result in reader.lines() {
+            let line = line_result?;
+            // Ignorer les lignes vides ou qui contiennent uniquement des séparateurs
+            if line.trim().is_empty() || line.trim().chars().all(|c| c == ';' || c == ' ') {
+                continue;
+            }
+            
+            // Désérialiser l'entrée
+            match LogEntry::deserialize(&line) {
+                Ok(entry) => all_entries.push(entry),
+                Err(_) => continue, // Ignorer les lignes invalides
+            }
+        }
+        
+        // Prendre les n dernières entrées
+        let start_index = if all_entries.len() > n {
+            all_entries.len() - n
+        } else {
+            0
+        };
+        
+        for entry in all_entries.into_iter().skip(start_index) {
+            logs.push(entry);
+        }
+        
+        if logs.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Aucune entrée de log trouvée",
+            ));
+        }
+        
+        Ok(logs)
     }
 }

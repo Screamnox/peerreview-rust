@@ -1,8 +1,8 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
-/// Type d’action enregistrée : envoi ou réception
-#[derive(Debug)]
+/// Type d'action enregistrée : envoi ou réception
+#[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum LogType {
     Send = 0,

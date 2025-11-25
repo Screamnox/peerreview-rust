@@ -1,2 +1,2 @@
 pub mod journal;
-pub mod Protocoles;
+pub mod protocols;

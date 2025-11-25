@@ -164,12 +164,18 @@ impl Logger {
     }
 
     ///Cette fonction a pour objectif de renvoyer le nombre de log demandé passé en paramètre du plus récent au plus ancien (trié par s_k)
-    pub fn get_log(self, mut nb_log: usize) -> std::io::Result<Vec<LogEntry>> {
-        let mut reader = BufReader::new(self.file);
-        reader.seek(SeekFrom::Start(0))?;
+    pub fn get_log(&mut self, mut nb_log: usize) -> std::io::Result<Vec<LogEntry>> {
+        self.file.seek(SeekFrom::Start(0))?;
+        let reader = BufReader::new(&self.file);
         let mut count: usize = 0;
-        let mut id: usize = self.line_current - 1;
         let lines = reader.lines().collect::<Result<Vec<String>, _>>()?;
+        
+        // Si aucun log n'a été écrit, retourner un vecteur vide
+        if self.line_current == 0 {
+            return Ok(Vec::new());
+        }
+        
+        let mut id: usize = self.line_current - 1;
         nb_log = nb_log.min(lines.len());
         let mut result = Vec::with_capacity(nb_log);
 

@@ -15,33 +15,6 @@ pub struct Logger {
 }
 
 impl Logger {
-    fn log_integrity(
-        reader: &mut BufReader<File>,
-        line_max: usize,
-        nb_semicol: u8,
-    ) -> std::io::Result<()> {
-        let mut nb_line_reader: usize = 0;
-
-        for line_result in reader.lines() {
-            nb_line_reader += 1;
-            if line_result.unwrap().matches(';').count() as u8 != nb_semicol {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Mauvais nombre de ';'",
-                ));
-            }
-        }
-
-        if nb_line_reader != line_max {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Le nombre de ligne du fichier de log existant et le nombre de ligne indiqué ne correspondent pas",
-            ));
-        }
-
-        Ok(())
-    }
-
     /// Remplit le fichier avec des lignes fictives (format standard)
     fn initialize_file(
         path: &str,
@@ -65,6 +38,45 @@ impl Logger {
         Ok(())
     }
 
+    fn log_integrity(
+        reader: &mut BufReader<File>,
+        line_max: usize,
+        nb_semicol: u8,
+    ) -> std::io::Result<(usize, usize)> {
+        let lines = reader.lines().collect::<Result<Vec<String>, _>>()?;
+        let size: usize = lines.len();
+
+        if size != line_max {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Le nombre de ligne du fichier de log existant et le nombre de ligne indiqué ne correspondent pas",
+            ));
+        }
+
+        let mut s_k: usize = 0;
+        let mut s_k_test: usize;
+
+        for line in lines {
+            if line.matches(';').count() as u8 != nb_semicol {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Mauvais nombre de ';'",
+                ));
+            }
+            s_k_test = line
+                .split(';')
+                .next()
+                .and_then(|s| s.parse::<usize>().ok()) // parse réussi → Some(valeur)
+                .unwrap_or(0);
+
+            if s_k_test > s_k {
+                s_k = s_k_test;
+            }
+        }
+        let line_current: usize = s_k % size;
+        Ok((s_k, line_current))
+    }
+
     /// Crée un nouveau logger, le fichier est créé s’il n’existe pas    
     pub fn new(path: &str, line_max: usize, min_line_size: usize) -> std::io::Result<Self> {
         let nb_semicol: u8 = 5;
@@ -76,29 +88,7 @@ impl Logger {
             file = File::open(path)?;
             let mut reader = BufReader::new(file);
 
-            Self::log_integrity(&mut reader, line_max, nb_semicol)?;
-            reader.seek(SeekFrom::Start(0))?;
-
-            let mut old_s_k: usize;
-
-            for line_result in reader.lines() {
-                let line = line_result?;
-
-                old_s_k = s_k;
-
-                s_k = line
-                    .split(';')
-                    .next()
-                    .and_then(|s| s.parse::<usize>().ok()) // parse réussi → Some(valeur)
-                    .unwrap_or(0);
-
-                // On cherche le s_k max en comparant avec old_s_k
-                if s_k < old_s_k {
-                    s_k = old_s_k;
-                    break;
-                }
-                line_current += 1;
-            }
+            (s_k, line_current) = Self::log_integrity(&mut reader, line_max, nb_semicol)?;
         } else {
             Self::initialize_file(path, line_max, min_line_size, nb_semicol)?;
         }
@@ -149,13 +139,6 @@ impl Logger {
         let entry = LogEntry::serialize(logentry);
 
         replace_line_at_position(&mut self.file, self.line_current, &entry)?;
-
-        let _out: LogEntry = LogEntry::deserialize(&entry)?;
-
-        /*println!(
-            "LogEntry:\n  s_k: {}\n  log_type: {:?}\n  dest: {}\n  hash: {:?}\n  sig: {:?}\n  msg: {}",
-            out.s_k, out.log_type, out.dest, out.hash, out.sig, out.msg
-        );*/
 
         self.line_current += 1;
         Ok(())

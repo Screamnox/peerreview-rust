@@ -26,4 +26,3 @@ target
 /target
 Cargo.lock
 journal.log
-save

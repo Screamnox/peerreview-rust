@@ -1,0 +1,263 @@
+use crate::journal::LogType;
+use crate::journal::entry::LogEntry;
+use std::collections::HashMap;
+
+use super::node::{PeerReviewNode, PeerReviewMessage};
+
+/// Structure pour gérer les challenges de consistency
+#[derive(Debug, Clone)]
+pub struct ConsistencyChallenge {
+    pub challenger_id: u32,
+    pub target_id: u32,
+    pub seq_num_start: usize,
+    pub seq_num_end: usize,
+}
+
+impl PeerReviewNode {
+    /// Envoie un challenge de consistency pour demander les entrées de log d'un nœud
+    /// Demande les entrées entre seq_start et seq_end
+    pub fn send_consistency_challenge(
+        &mut self,
+        target_id: u32,
+        seq_start: usize,
+        seq_end: usize,
+    ) -> std::io::Result<ConsistencyChallenge> {
+        let challenge_msg = format!(
+            "CHALLENGE_CONSISTENCY: Demande logs [{}, {}]",
+            seq_start, seq_end
+        );
+        
+        self.logger.log(LogType::Send, target_id, &challenge_msg)?;
+        
+        // Récupérer la dernière entrée pour mettre à jour prev_hash
+        let logs = self.logger.get_log(1)?;
+        self.prev_hash = logs[0].hash;
+        
+        println!(
+            "[Nœud {}] Challenge de consistency envoyé au nœud {} pour logs [{}, {}]",
+            self.node_id, target_id, seq_start, seq_end
+        );
+        
+        Ok(ConsistencyChallenge {
+            challenger_id: self.node_id,
+            target_id,
+            seq_num_start: seq_start,
+            seq_num_end: seq_end,
+        })
+    }
+
+    /// Répond à un challenge de consistency en envoyant les entrées de log demandées
+    pub fn respond_to_consistency_challenge(
+        &mut self,
+        challenge: &ConsistencyChallenge,
+        _seq_start: usize,
+        _seq_end: usize,
+    ) -> std::io::Result<Vec<LogEntry>> {
+        // TODO: Pour l'instant, on récupère simplement les derniers logs disponibles
+        // Plus tard, il faudra récupérer les entrées spécifiques demandées
+        let requested_count = challenge.seq_num_end.saturating_sub(challenge.seq_num_start) + 1;
+        let logs = self.logger.get_log(requested_count)?;
+        
+        // Logger la réponse
+        let response_msg = format!(
+            "RESPONSE_CONSISTENCY: {} entrées envoyées",
+            logs.len()
+        );
+        self.logger.log(LogType::Send, challenge.challenger_id, &response_msg)?;
+        
+        println!(
+            "[Nœud {}] Réponse au challenge de consistency du nœud {} : {} entrées envoyées",
+            self.node_id, challenge.challenger_id, logs.len()
+        );
+        
+        Ok(logs)
+    }
+
+    /// Vérifie la consistency des logs reçus d'un autre nœud
+    /// TODO: La vérification complète sera implémentée quand le Logger calculera les hash
+    pub fn verify_consistency(
+        &self,
+        target_id: u32,
+        received_logs: &[LogEntry],
+    ) -> bool {
+        if received_logs.is_empty() {
+            println!(
+                "[Nœud {}] Erreur: Aucune entrée reçue du nœud {}",
+                self.node_id, target_id
+            );
+            return false;
+        }
+
+        // Vérification basique pour l'instant
+        println!(
+            "[Nœud {}] Vérification de consistency du nœud {} : {} entrées reçues",
+            self.node_id, target_id, received_logs.len()
+        );
+
+        // TODO: Vérifier la chaîne de hash quand implémentée
+        // Pour chaque entrée i:
+        // 1. Vérifier que h_i = H(h_{i-1} || s_i || type_i || H(commitment_i))
+        // 2. Vérifier que les numéros de séquence sont consécutifs
+        // 3. Vérifier les signatures
+
+        // Pour l'instant, on vérifie juste que les numéros de séquence sont cohérents
+        for window in received_logs.windows(2) {
+            if window[1].s_k != window[0].s_k + 1 {
+                println!(
+                    "[Nœud {}] Erreur: Numéros de séquence non consécutifs ({} -> {})",
+                    self.node_id, window[0].s_k, window[1].s_k
+                );
+                return false;
+            }
+        }
+
+        println!(
+            "[Nœud {}] Logs du nœud {} sont cohérents (vérification simplifiée)",
+            self.node_id, target_id
+        );
+        true
+    }
+
+    /// Vérifie la consistency entre deux nœuds sur une plage de logs donnée
+    pub fn cross_check_consistency(
+        &mut self,
+        node_a_id: u32,
+        node_b_id: u32,
+        seq_start: usize,
+        seq_end: usize,
+    ) -> std::io::Result<bool> {
+        println!(
+            "[Nœud {}] Vérification croisée de consistency entre nœuds {} et {} pour logs [{}, {}]",
+            self.node_id, node_a_id, node_b_id, seq_start, seq_end
+        );
+
+        // TODO: Cette fonction sera complétée pour comparer les logs de deux nœuds
+        // Pour l'instant, on enregistre juste la demande de vérification
+
+        let check_msg = format!(
+            "CROSS_CHECK: Vérification nœuds {} et {} [{}, {}]",
+            node_a_id, node_b_id, seq_start, seq_end
+        );
+        self.logger.log(LogType::Send, node_a_id, &check_msg)?;
+
+        Ok(true)
+    }
+
+    /// Détecte les incohérences dans les logs en comparant avec d'autres nœuds témoins
+    pub fn detect_inconsistency(
+        &self,
+        target_id: u32,
+        target_logs: &[LogEntry],
+        witness_logs: &HashMap<u32, Vec<LogEntry>>,
+    ) -> Vec<String> {
+        let mut inconsistencies = Vec::new();
+
+        println!(
+            "[Nœud {}] Détection d'incohérences pour le nœud {} avec {} témoins",
+            self.node_id, target_id, witness_logs.len()
+        );
+
+        // TODO: Comparer les logs du target avec ceux des témoins
+        // Pour l'instant, vérification basique
+
+        if target_logs.is_empty() {
+            inconsistencies.push(format!(
+                "Nœud {} n'a fourni aucune entrée de log",
+                target_id
+            ));
+        }
+
+        // Vérifier que tous les témoins sont d'accord
+        for (witness_id, logs) in witness_logs {
+            if logs.len() != target_logs.len() {
+                inconsistencies.push(format!(
+                    "Divergence de taille: nœud {} ({} entrées) vs témoin {} ({} entrées)",
+                    target_id,
+                    target_logs.len(),
+                    witness_id,
+                    logs.len()
+                ));
+            }
+        }
+
+        if inconsistencies.is_empty() {
+            println!(
+                "[Nœud {}] Aucune incohérence détectée pour le nœud {}",
+                self.node_id, target_id
+            );
+        } else {
+            println!(
+                "[Nœud {}] {} incohérence(s) détectée(s) pour le nœud {}",
+                self.node_id,
+                inconsistencies.len(),
+                target_id
+            );
+        }
+
+        inconsistencies
+    }
+
+    /// Crée un rapport d'audit suite à une détection d'incohérence
+    pub fn create_audit_report(
+        &mut self,
+        target_id: u32,
+        inconsistencies: &[String],
+    ) -> std::io::Result<()> {
+        if inconsistencies.is_empty() {
+            return Ok(());
+        }
+
+        let report_msg = format!(
+            "AUDIT_REPORT: {} incohérence(s) détectée(s) pour nœud {}",
+            inconsistencies.len(),
+            target_id
+        );
+
+        self.logger.log(LogType::Send, target_id, &report_msg)?;
+
+        // Récupérer la dernière entrée pour mettre à jour prev_hash
+        let logs = self.logger.get_log(1)?;
+        self.prev_hash = logs[0].hash;
+
+        println!(
+            "[Nœud {}] Rapport d'audit créé pour le nœud {} : {} problème(s)",
+            self.node_id, target_id, inconsistencies.len()
+        );
+
+        for (i, inc) in inconsistencies.iter().enumerate() {
+            println!("  {}. {}", i + 1, inc);
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::Logger;
+
+    #[test]
+    fn test_consistency_challenge() -> std::io::Result<()> {
+        let logger = Logger::new("test_consistency.log", 100, 200)?;
+        let mut node = PeerReviewNode::new(1, logger, [1; 32]);
+
+        let challenge = node.send_consistency_challenge(2, 10, 20)?;
+
+        assert_eq!(challenge.challenger_id, 1);
+        assert_eq!(challenge.target_id, 2);
+        assert_eq!(challenge.seq_num_start, 10);
+        assert_eq!(challenge.seq_num_end, 20);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_verify_consistency_empty() {
+        let logger = Logger::new("test_consistency_empty.log", 100, 200).unwrap();
+        let node = PeerReviewNode::new(1, logger, [1; 32]);
+
+        let result = node.verify_consistency(2, &[]);
+        assert!(!result);
+    }
+}

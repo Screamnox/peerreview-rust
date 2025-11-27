@@ -82,6 +82,25 @@ fn main() -> std::io::Result<()> {
         println!("✓ Challenge créé suite au timeout\n");
     }
 
+    // === Scénario 4: Test du protocole de Consistency ===
+    println!("--- Scénario 4: Protocole de Consistency ---");
+    
+    // Nœud 1 envoie un challenge de consistency au nœud 2
+    let consistency_challenge = node1.send_consistency_challenge(2, 1, 5)?;
+    println!("✓ Challenge de consistency envoyé\n");
+    
+    // Nœud 2 répond avec ses logs
+    let logs_from_node2 = node2.respond_to_consistency_challenge(&consistency_challenge, 1, 5)?;
+    println!("✓ Nœud 2 a répondu avec {} entrées\n", logs_from_node2.len());
+    
+    // Nœud 1 vérifie la consistency des logs reçus
+    let is_consistent = node1.verify_consistency(2, &logs_from_node2);
+    if is_consistent {
+        println!("✓ Les logs du nœud 2 sont cohérents\n");
+    } else {
+        println!("✗ Incohérence détectée dans les logs du nœud 2\n");
+    }
+
     println!("=== Démonstration terminée ===");
 
     // Test de get_log() de la branche journal

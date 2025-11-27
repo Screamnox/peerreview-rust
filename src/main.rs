@@ -105,11 +105,13 @@ fn main() -> std::io::Result<()> {
 
     // Test de get_log() de la branche journal
     let mut test_logger = Logger::new("journal.log", 10, 200)?;
-    let result = test_logger.get_log(100)?;
+    let result = test_logger.get_log(10)?;
+    
     println!("\nTest get_log - Taille : {}", result.len());
-    let result = logger.get_log(10)?;
-
-    println!("Première log du get_log : {}", result[0]);
+    
+    if !result.is_empty() {
+        println!("Première log du get_log : {:?}", result[0]);
+    }
 
     Ok(())
 }

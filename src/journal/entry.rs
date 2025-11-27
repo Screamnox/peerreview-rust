@@ -1,5 +1,6 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use std::fmt;
 
 /// Type d'action enregistrée : envoi ou réception
 #[derive(Debug, Clone, Copy)]
@@ -127,5 +128,18 @@ impl LogEntry {
             sig,
             msg: msg_string,
         })
+    }
+}
+
+impl fmt::Display for LogEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hash_hex = hex::encode(self.hash);
+        let sig_hex = hex::encode(self.sig);
+
+        write!(
+            f,
+            "LogEntry:\n  s_k: {}\n  log_type: {:?}\n  dest: {}\n  hash: {}\n  sig: {}\n  msg: {}",
+            self.s_k, self.log_type, self.dest, hash_hex, sig_hex, self.msg
+        )
     }
 }

@@ -1,9 +1,9 @@
+use ed25519_dalek::Keypair;
 use ed25519_dalek::ed25519::signature::SignerMut;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
-use ed25519_dalek::Keypair;
 
 // Imports internes :
 use super::entry::{LogEntry, LogType};
@@ -11,10 +11,9 @@ use super::file_utils::replace_line_at_position;
 
 pub const NB_SEMICOL: u8 = 6;
 const HASH_INIT: [u8; 32] = [
-                0x3A, 0x92, 0x11, 0xDE, 0x77, 0xC4, 0x0B, 0xE8, 0x5F, 0xA2, 0x39, 0x6C, 0x00, 0x4D,
-                0x8B, 0x17, 0xD1, 0x20, 0xFE, 0x58, 0x93, 0xA7, 0x51, 0xCE, 0x29, 0x74, 0x66, 0x01,
-                0xB8, 0x42, 0xDA, 0x10,
-            ];
+    0x3A, 0x92, 0x11, 0xDE, 0x77, 0xC4, 0x0B, 0xE8, 0x5F, 0xA2, 0x39, 0x6C, 0x00, 0x4D, 0x8B, 0x17,
+    0xD1, 0x20, 0xFE, 0x58, 0x93, 0xA7, 0x51, 0xCE, 0x29, 0x74, 0x66, 0x01, 0xB8, 0x42, 0xDA, 0x10,
+];
 
 /// Journaliseur : écrit les entrées dans un fichier texte
 pub struct Logger {
@@ -28,20 +27,15 @@ pub struct Logger {
 
 impl Logger {
     fn generate_keypair() -> Keypair {
-        use rand::rngs::OsRng;
         use ed25519_dalek::Keypair;
+        use rand::rngs::OsRng;
 
         let mut rng = OsRng;
         Keypair::generate(&mut rng)
     }
 
-
     /// Remplit le fichier avec des lignes fictives (format standard)
-    fn initialize_file(
-        path: &str,
-        line_max: usize,
-        min_line_size: usize,
-    ) -> std::io::Result<()> {
+    fn initialize_file(path: &str, line_max: usize, min_line_size: usize) -> std::io::Result<()> {
         let mut file = File::create(path)?;
 
         let base_line: String = ";".repeat(NB_SEMICOL as usize);
@@ -92,7 +86,11 @@ impl Logger {
             }
         }
         let line_current: usize = s_k % size; //Récupère la ligne actuelle en se basant sur le module de s_k par size
-        Ok((s_k, line_current, LogEntry::deserialize(&lines[(line_current + size - 1) % size])?.hash /*Récupère le dernier hash*/))
+        Ok((
+            s_k,
+            line_current,
+            LogEntry::deserialize(&lines[(line_current + size - 1) % size])?.hash, /*Récupère le dernier hash*/
+        ))
     }
 
     /// Crée un nouveau logger, le fichier est créé s’il n’existe pas    
@@ -143,7 +141,7 @@ impl Logger {
         hasher.update(correspondent.to_be_bytes());
         hasher.update(s_k_corr.to_be_bytes());
         hasher.update(msg.as_bytes());
-        
+
         let mut c_k = [0u8; 32];
         c_k.copy_from_slice(&hasher.finalize());
 
@@ -178,11 +176,7 @@ impl Logger {
     //---------------------------------------------------------------------------------------------------------
 
     /// Ajoute une entrée send au journal
-    pub fn log_send(
-        &mut self,
-        correspondent: u32,
-        msg: &str,
-    ) -> std::io::Result<()> {
+    pub fn log_send(&mut self, correspondent: u32, msg: &str) -> std::io::Result<()> {
         self.s_k += 1;
 
         if self.line_current >= self.line_max {
@@ -192,7 +186,7 @@ impl Logger {
         let mut hasher = Sha256::new();
         hasher.update(correspondent.to_be_bytes());
         hasher.update(msg.as_bytes());
-        
+
         let mut c_k = [0u8; 32];
         c_k.copy_from_slice(&hasher.finalize());
 

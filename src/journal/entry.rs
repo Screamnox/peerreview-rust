@@ -2,7 +2,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use std::fmt;
 
-use crate::journal::logger::{NB_SEMICOL};
+use crate::journal::logger::NB_SEMICOL;
 
 /// Type d’action enregistrée : envoi ou réception
 #[derive(Debug, PartialEq, Clone)]
@@ -43,7 +43,13 @@ impl LogEntry {
         // Format: s_k;log_type;corr;hash_hex;sig_hex;msg_base64
         format!(
             "{};{};{};{};{};{};{}",
-            log_entry.s_k, log_type_val, log_entry.corr, log_entry.s_k_corr, hash_hex, sig_hex, msg_base64
+            log_entry.s_k,
+            log_type_val,
+            log_entry.corr,
+            log_entry.s_k_corr,
+            hash_hex,
+            sig_hex,
+            msg_base64
         )
     }
 
@@ -52,7 +58,7 @@ impl LogEntry {
     pub fn deserialize(line: &str) -> std::io::Result<LogEntry> {
         let parts: Vec<&str> = line.split(';').collect();
 
-        if parts.len() != NB_SEMICOL as usize + 1{
+        if parts.len() != NB_SEMICOL as usize + 1 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Format invalide : {} champs attendus", NB_SEMICOL),
@@ -85,9 +91,9 @@ impl LogEntry {
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "corr invalide"))?;
 
         //Parser s_k_corr
-        let s_k_corr = parts[3]
-            .parse::<usize>()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "s_k_corr invalide"))?;
+        let s_k_corr = parts[3].parse::<usize>().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "s_k_corr invalide")
+        })?;
 
         // Parser hash (hex -> [u8; 32])
         let hash_hex = parts[4].trim();

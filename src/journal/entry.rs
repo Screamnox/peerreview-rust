@@ -2,8 +2,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use std::fmt;
 
+use crate::journal::logger::{NB_SEMICOL};
+
 /// Type d’action enregistrée : envoi ou réception
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 #[repr(u8)]
 pub enum LogType {
     Send = 0,
@@ -15,15 +17,16 @@ pub enum LogType {
 pub struct LogEntry {
     pub s_k: usize,        // numéro séquentiel (anciennement timestamp)
     pub log_type: LogType, // type d’opération
-    pub dest: u32,
+    pub corr: u32,
+    pub s_k_corr: usize,
     pub hash: [u8; 32],
-    pub sig: [u8; 32],
+    pub sig: [u8; 64],
     pub msg: String,
 }
 
 impl LogEntry {
     /// Sérialise une LogEntry en string formatée
-    /// Format: s_k;log_type;dest;hash_hex;sig_hex;msg_base64
+    /// Format: s_k;log_type;corr;hash_hex;sig_hex;msg_base64
     pub fn serialize(log_entry: LogEntry) -> String {
         let log_type_val = match log_entry.log_type {
             LogType::Send => 0u8,
@@ -37,22 +40,22 @@ impl LogEntry {
         // Convertir le message en base64
         let msg_base64 = STANDARD.encode(&log_entry.msg);
 
-        // Format: s_k;log_type;dest;hash_hex;sig_hex;msg_base64
+        // Format: s_k;log_type;corr;hash_hex;sig_hex;msg_base64
         format!(
-            "{};{};{};{};{};{}",
-            log_entry.s_k, log_type_val, log_entry.dest, hash_hex, sig_hex, msg_base64
+            "{};{};{};{};{};{};{}",
+            log_entry.s_k, log_type_val, log_entry.corr, log_entry.s_k_corr, hash_hex, sig_hex, msg_base64
         )
     }
 
     /// Désérialise une string en LogEntry
-    /// Format: s_k;log_type;dest;hash_hex;sig_hex;msg_base64
+    /// Format: s_k;log_type;corr;hash_hex;sig_hex;msg_base64
     pub fn deserialize(line: &str) -> std::io::Result<LogEntry> {
         let parts: Vec<&str> = line.split(';').collect();
 
-        if parts.len() != 6 {
+        if parts.len() != NB_SEMICOL as usize + 1{
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Format invalide : 6 champs attendus",
+                format!("Format invalide : {} champs attendus", NB_SEMICOL),
             ));
         }
 
@@ -76,13 +79,18 @@ impl LogEntry {
             }
         };
 
-        // Parser dest
-        let dest = parts[2]
+        // Parser corr
+        let corr = parts[2]
             .parse::<u32>()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "dest invalide"))?;
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "corr invalide"))?;
+
+        //Parser s_k_corr
+        let s_k_corr = parts[3]
+            .parse::<usize>()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "s_k_corr invalide"))?;
 
         // Parser hash (hex -> [u8; 32])
-        let hash_hex = parts[3].trim();
+        let hash_hex = parts[4].trim();
         let hash_bytes = hex::decode(hash_hex).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "hash hex invalide")
         })?;
@@ -95,22 +103,22 @@ impl LogEntry {
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&hash_bytes);
 
-        // Parser sig (hex -> [u8; 32])
-        let sig_hex = parts[4].trim();
+        // Parser sig (hex -> [u8; 64])
+        let sig_hex = parts[5].trim();
         let sig_bytes = hex::decode(sig_hex).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "sig hex invalide")
         })?;
-        if sig_bytes.len() != 32 {
+        if sig_bytes.len() != 64 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "sig doit faire 32 bytes",
+                "sig doit faire 64 bytes",
             ));
         }
-        let mut sig = [0u8; 32];
+        let mut sig = [0u8; 64];
         sig.copy_from_slice(&sig_bytes);
 
         // Parser msg (base64 -> String)
-        let msg = STANDARD.decode(parts[5].trim()).map_err(|_| {
+        let msg = STANDARD.decode(parts[6].trim()).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "msg base64 invalide")
         })?;
         let msg_string = String::from_utf8(msg).map_err(|_| {
@@ -123,7 +131,8 @@ impl LogEntry {
         Ok(LogEntry {
             s_k,
             log_type,
-            dest,
+            corr,
+            s_k_corr,
             hash,
             sig,
             msg: msg_string,
@@ -138,8 +147,8 @@ impl fmt::Display for LogEntry {
 
         write!(
             f,
-            "LogEntry:\n  s_k: {}\n  log_type: {:?}\n  dest: {}\n  hash: {}\n  sig: {}\n  msg: {}",
-            self.s_k, self.log_type, self.dest, hash_hex, sig_hex, self.msg
+            "LogEntry:\n  s_k: {}\n  log_type: {:?}\n  corr: {}\n  s_k_corr: {}\n hash: {}\n  sig: {}\n  msg: {}",
+            self.s_k, self.log_type, self.corr, self.s_k_corr, hash_hex, sig_hex, self.msg
         )
     }
 }

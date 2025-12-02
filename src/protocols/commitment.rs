@@ -1,4 +1,4 @@
-use crate::journal::LogType;
+use crate::journal::entry::LogType;
 use std::time::Duration;
 
 use super::node::{PeerReviewNode, PeerReviewMessage, MessageType};
@@ -20,10 +20,10 @@ impl PeerReviewNode {
         let prev_hash_for_msg = self.prev_hash;
         
         // Logger l'entrée - le Logger crée le hash et la signature
-        self.logger.log(LogType::Send, receiver_id, message)?;
+        self.logger.log_send(receiver_id, message)?;
         
         // Récupérer la dernière entrée via get_log(1)
-        let logs = self.logger.get_log(1)?;
+        let logs = self.logger.get_log(1)?
         let log_entry = &logs[0];
         
         // Mettre à jour prev_hash avec le hash du journal
@@ -86,10 +86,10 @@ impl PeerReviewNode {
 
         // Étape 3: Message valide
         // Étape 4: Créer une entrée de log RECV (cl = {i, sk, m})
-        self.logger.log(LogType::Recv, sender_id, &msg.payload)?;
+        self.logger.log_recv(sender_id, msg.seq_num, msg.signature, &msg.payload)?;
         
         // Étape 5: Créer une entrée de log SEND pour l'acquittement (cl+1 = {i})
-        self.logger.log(LogType::Send, sender_id, "")?;
+        self.logger.log_send(sender_id, "")?;
         
         // Récupérer les 2 dernières entrées via get_log(2)
         let logs = self.logger.get_log(2)?;
@@ -142,7 +142,7 @@ impl PeerReviewNode {
     /// Crée un challenge d'audit pour signaler un problème
     fn create_audit_challenge(&mut self, target_node: u32, reason: &str) -> std::io::Result<()> {
         let challenge_msg = format!("CHALLENGE_AUDIT: {}", reason);
-        self.logger.log(LogType::Send, target_node, &challenge_msg)?;
+        self.logger.log_send(target_node, &challenge_msg)?;
         
         // Récupérer la dernière entrée pour mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;
@@ -179,7 +179,7 @@ impl PeerReviewNode {
 
         // Pas d'acquittement ou invalide - créer un challenge d'envoi
         let challenge_msg = "CHALLENGE_SEND: Timeout - pas d'acquittement";
-        self.logger.log(LogType::Send, receiver_id, challenge_msg)?;
+        self.logger.log_send(receiver_id, challenge_msg)?;
         
         // Récupérer la dernière entrée pour mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;

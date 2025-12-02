@@ -6,4 +6,7 @@ edition = "2024"
 [dependencies]
 hex = "0.4"
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.10.9"
+ed25519-dalek = "1.0"
+rand = "0.7"
+rand_core = "0.5"

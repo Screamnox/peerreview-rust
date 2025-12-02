@@ -15,7 +15,7 @@ pub struct PeerReviewMessage {
     pub seq_num: usize,          // sk
     #[allow(dead_code)]
     pub prev_hash: [u8; 32],     // hk-1
-    pub signature: [u8; 32],     // αk (signature MAC)
+    pub signature: [u8; 64],     // αk (signature MAC)
     #[allow(dead_code)]
     pub dest: u32,               // Destinataire
     pub payload: String,         // Message m

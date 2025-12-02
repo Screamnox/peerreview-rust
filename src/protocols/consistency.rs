@@ -1,8 +1,7 @@
-use crate::journal::LogType;
-use crate::journal::entry::LogEntry;
+use crate::journal::entry::{LogEntry, LogType};
 use std::collections::HashMap;
 
-use super::node::{PeerReviewNode, PeerReviewMessage};
+use super::node::PeerReviewNode;
 
 /// Structure pour gérer les challenges de consistency
 #[derive(Debug, Clone)]
@@ -27,7 +26,7 @@ impl PeerReviewNode {
             seq_start, seq_end
         );
         
-        self.logger.log(LogType::Send, target_id, &challenge_msg)?;
+        self.logger.log_send(target_id, &challenge_msg)?;
         
         // Récupérer la dernière entrée pour mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;
@@ -63,7 +62,7 @@ impl PeerReviewNode {
             "RESPONSE_CONSISTENCY: {} entrées envoyées",
             logs.len()
         );
-        self.logger.log(LogType::Send, challenge.challenger_id, &response_msg)?;
+        self.logger.log_send(challenge.challenger_id, &response_msg)?;
         
         println!(
             "[Nœud {}] Réponse au challenge de consistency du nœud {} : {} entrées envoyées",
@@ -138,7 +137,7 @@ impl PeerReviewNode {
             "CROSS_CHECK: Vérification nœuds {} et {} [{}, {}]",
             node_a_id, node_b_id, seq_start, seq_end
         );
-        self.logger.log(LogType::Send, node_a_id, &check_msg)?;
+        self.logger.log_send(node_a_id, &check_msg)?;
 
         Ok(true)
     }
@@ -213,7 +212,7 @@ impl PeerReviewNode {
             target_id
         );
 
-        self.logger.log(LogType::Send, target_id, &report_msg)?;
+        self.logger.log_send(target_id, &report_msg)?;
 
         // Récupérer la dernière entrée pour mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;

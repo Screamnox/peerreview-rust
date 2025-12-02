@@ -9,3 +9,9 @@
 
 # Docker
 **/*.log
+
+# Documentation - exclude all except README.md
+*.pdf
+*.tex
+*.md
+!README.md

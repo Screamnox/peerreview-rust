@@ -1,3 +1,5 @@
+pub mod nfs;
+
 pub type NodeId = String;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -15,3 +17,6 @@ pub struct Msg {
     pub ts_ms: u64,
     pub tree_id: u8,
 }
+
+// Re-export NFS types for convenience
+pub use nfs::*;

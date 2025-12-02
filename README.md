@@ -1,105 +1,183 @@
-# PeerReview-Rust
+# PeerReview-Rust - Système NFS Distribué
 
-Infrastructure distribuée multi-arbres pour l’intégration de PeerReview
+Infrastructure distribuée pour l'intégration de PeerReview avec application NFS (Network File System) déterministe.
 
 ---
 
-Table of Contents
+## Table of Contents
 
 - [Introduction](#introduction)
-- [Objectifs du projet](#objectifs-du-projet)
-- [Architecture générale](#architecture-générale)
-- [Topologie multi-arbres](#topologie-multi-arbres)
-  - [Motivation](#motivation)
-  - [Construction des arbres](#construction-des-arbres)
-  - [Configuration](#configuration)
-- [Communication interne (TCP)](#communication-interne-tcp)
-- [API HTTP](#api-http)
-- [Structure du dépôt](#structure-du-dépôt)
-- [Fonctionnalités actuelles](#fonctionnalités-actuelles)
-- [Démos possibles](#démos-possibles)
-  - [Diffusion globale d'un message](#diffusion-globale-dun-message)
-  - [Publication depuis n'importe quel nœud](#publication-depuis-nimporte-quel-nœud)
-  - [Envoi intensif de messages](#envoi-intensif-de-messages)
-- [Lien avec PeerReview](#lien-avec-peerreview)
-- [Conclusion](#conclusion)
+- [Applications](#applications)
+  - [Application Gossip (Multi-arbres)](#application-gossip-multi-arbres)
+  - [Application NFS](#application-nfs)
+- [Architecture NFS](#architecture-nfs)
+- [Démarrage Rapide - NFS](#démarrage-rapide---nfs)
+- [Utilisation de l'API NFS](#utilisation-de-lapi-nfs)
+- [Configuration](#configuration)
+- [Structure du Dépôt](#structure-du-dépôt)
+- [Déterminisme et PeerReview](#déterminisme-et-peerreview)
+- [Références](#références)
 
 ---
 
-## 1. Introduction
+## Introduction
 
-Ce projet implémente une infrastructure distribuée en Rust destinée à servir de base au protocole PeerReview (Haeberlen et al., SOSP 2007).  
-Il repose sur :
+Ce projet implémente une infrastructure distribuée en Rust destinée à servir de base au protocole PeerReview (Haeberlen et al., SOSP 2007). Il contient deux applications démontrant la versatilité du framework :
 
-- une diffusion structurée en plusieurs arbres (multi-tree),
-- un réseau TCP interne léger et performant,
-- une API HTTP simplifiée pour les interactions extérieures,
-- une configuration flexible via YAML,
-- un cluster Docker reproductible à 10 nœuds.
+1. **Gossip** : Diffusion structurée multi-arbres
+2. **NFS** : Système de fichiers réseau déterministe
 
-L’objectif est de disposer d’un environnement distribué cohérent, sur lequel les mécanismes PeerReview pourront être implémentés : journaux sécurisés, audits, détection de comportements fautifs et preuves cryptographiques.
+---
 
-## 2. Objectifs du projet
+## Applications
 
-Le projet vise à fournir :
+### Application Gossip (Multi-arbres)
 
-- une topologie distribuée stable et configurable ;
-- des canaux de diffusion multiples pour la résilience et la performance ;
-- un protocole P2P clair et extensible ;
-- une base technique pour intégrer PeerReview.
+Infrastructure distribuée avec :
+- Diffusion structurée en plusieurs arbres (multi-tree)
+- Réseau TCP interne léger et performant
+- API HTTP simplifiée pour interactions extérieures
+- Cluster Docker à 10 nœuds
 
-Le système actuel constitue la couche réseau et topologique du futur PeerReview.
+**Voir la documentation complète** : [Documentation Gossip détaillée](docs/gossip.md) *(fichier à créer si besoin)*
 
-## 3. Architecture générale
+### Application NFS
 
-Chaque nœud exécute :
+Système de fichiers réseau avec :
+- **Horloge logique de Lamport** pour déterminisme complet
+- **Opérations** : READ, WRITE, DELETE, LIST
+- **Protocoles duaux** : TCP binaire + API HTTP REST
+- **Concurrence déterministe** : verrous par fichier avec DashMap
+- **Traçabilité complète** : historique des opérations pour replay
 
-- un serveur TCP : communication P2P interne ;
-- un serveur HTTP : interactions externes (publish, stats) ;
-- un moteur de diffusion multi-arbres ;
-- des tâches périodiques (heartbeats) ;
-- un module de déduplication (évite les boucles et répétitions).
+---
 
-Le cluster est orchestré via Docker Compose, permettant un déploiement reproductible à 10 nœuds. Chaque nœud est autonome : pas de coordinateur central.
+## Architecture NFS
 
-## 4. Topologie multi-arbres
-
-### 4.1. Motivation
-
-Le système repose sur plusieurs arbres de diffusion pour :
-
-- améliorer la résilience (un arbre peut tomber) ;
-- répartir la charge ;
-- fournir des chemins logiques distincts, nécessaires aux opérations PeerReview ;
-- limiter la congestion d’un seul arbre.
-
-### 4.2. Construction des arbres
-
-La topologie est dérivée de `cluster.yaml`, qui contient :
-
-- la liste des nœuds,
-- le nombre d'arbres (`num_trees`),
-- le facteur de branchement (`fanout`).
-
-Pour chaque arbre :
-
-1. Un ordre aléatoire de tous les nœuds est généré.
-2. Cet ordre est transformé en arbre k-aire selon le `fanout`.
-3. Chaque nœud ne connaît que ses propres enfants pour cet arbre.
-
-Chaque nœud possède donc une structure (exemple conceptuel) :
-
-```text
-children_by_tree = {
-  0: [child1, child2, ...],
-  1: [childA, childB, ...],
-  ...
-}
+```
+┌─────────────┐                  ┌─────────────┐
+│   Client    │  ──── TCP ────>  │  NFS Server │
+│             │  <─── RPC ─────  │             │
+└─────────────┘                  └──────┬──────┘
+                                        │
+                                        ▼
+                                  ┌──────────┐
+                                  │  Volume  │
+                                  │  /data/  │
+                                  └──────────┘
 ```
 
-### 4.3. Configuration
+### Composants NFS
+- **Clients** : Émettent des requêtes NFS
+- **Serveurs** : Traitent les requêtes et manipulent les fichiers
+- **Volumes** : Stockage persistant isolé par serveur
 
-Extrait de `configs/docker/cluster.yaml` (exemple) :
+### Stack Technologique
+- **Langage** : Rust 1.82
+- **Runtime Async** : Tokio
+- **HTTP Framework** : Axum 0.7
+- **Sérialisation** : Bincode (TCP) + Serde JSON (HTTP)
+- **Concurrence** : DashMap + Parking Lot
+- **Infrastructure** : Docker + Docker Compose
+
+---
+
+## Démarrage Rapide - NFS
+
+### Prérequis
+- Rust 1.82+
+- Docker + Docker Compose
+- Cargo (inclus avec Rust)
+
+### Installation et Lancement
+
+#### Option 1 : Compilation Locale
+```bash
+# Compiler uniquement le nœud NFS
+cargo build --release --package nfs_node
+
+# Lancer un serveur
+cargo run --package nfs_node -- --config configs/docker/nfs_server1.yaml
+```
+
+#### Option 2 : Déploiement Docker (Recommandé)
+```bash
+# Construire l'image
+docker build -f docker/Dockerfile.nfs -t nfs-node .
+
+# Lancer le cluster (3 serveurs)
+docker compose -f docker/nfs-compose.yml up
+```
+
+**Les serveurs démarrent sur :**
+- Serveur 1 : TCP `9091`, HTTP `8091`
+- Serveur 2 : TCP `9092`, HTTP `8092`
+- Serveur 3 : TCP `9093`, HTTP `8093`
+
+---
+
+## Utilisation de l'API NFS
+
+### Écrire un Fichier
+```bash
+curl -X POST http://localhost:8091/write \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file_path": "test.txt",
+    "offset": 0,
+    "data": [72, 101, 108, 108, 111]
+  }'
+```
+
+### Lire un Fichier
+```bash
+curl -X POST http://localhost:8091/read \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file_path": "test.txt",
+    "offset": 0,
+    "length": 100
+  }'
+```
+
+### Lister les Fichiers
+```bash
+curl -X POST http://localhost:8091/list \
+  -H "Content-Type: application/json" \
+  -d '{"dir_path": "/"}'
+```
+
+### Supprimer un Fichier
+```bash
+curl -X POST http://localhost:8091/delete \
+  -H "Content-Type: application/json" \
+  -d '{"file_path": "test.txt"}'
+```
+
+### Statistiques du Serveur
+```bash
+curl http://localhost:8091/stats
+```
+
+---
+
+## Configuration
+
+### Exemple de Configuration NFS (`nfs_server1.yaml`)
+
+```yaml
+node_id: "nfs_server_1"
+tcp_port: 9091
+http_port: 8091
+volume_root: "/data/nfs_server_1"
+peers:
+  - node_id: "nfs_server_2"
+    address: "nfs_server_2:9092"
+  - node_id: "nfs_server_3"
+    address: "nfs_server_3:9093"
+```
+
+### Exemple de Configuration Gossip (`cluster.yaml`)
 
 ```yaml
 fanout: 3
@@ -111,192 +189,149 @@ nodes:
   # ...
 ```
 
-Modifier `fanout` ou `num_trees` régénère entièrement la topologie.
+---
 
-## 5. Communication interne (TCP)
+## Structure du Dépôt
 
-Les nœuds communiquent en TCP avec un protocole binaire léger basé sur `bincode`. Chaque message est une structure partagée définie dans `crates/common_proto`.
-
-Exemple (conceptuel) :
-
-```rust
-enum MsgKind {
-    Heartbeat { counter: u64, tree_id: u8 },
-    Publish,
-    // ... autres types (Ihave, Request, Batch) ...
-}
-
-struct Message {
-    msg_id: Uuid,
-    sender_id: String,
-    tree_id: u8,
-    kind: MsgKind,
-    payload: Option<Vec<u8>>,
-    timestamp: u64,
-}
 ```
-
-La déduplication sur `(tree_id, msg_id)` empêche toute retransmission cyclique.
-
-## 6. API HTTP
-
-Une API REST minimale expose deux routes principales :
-
-### POST /publish
-
-Injecte un message dans le système. Pour chaque arbre, un message est généré et diffusé vers les enfants du nœud.
-
-Exemple :
-
-```bash
-curl -X POST http://localhost:8083/publish \
-     -H "Content-Type: application/json" \
-     -d '{"payload":"Hello"}'
-```
-
-### GET /stats
-
-Affiche l’état interne du nœud :
-
-- nombre de messages distincts reçus,
-- derniers messages reçus,
-- nombre d’arbres, etc.
-
-Exemple :
-
-```bash
-curl http://localhost:8081/stats
-```
-
-Note : les ports et hôtes dépendent de la configuration dans `configs/docker/cluster.yaml`. Ajustez les URL selon vos paramètres.
-
-## 7. Structure du dépôt
-
 peerreview-rust/
 │
-├─ crates/
-│   ├─ common_proto/       # Format des messages TCP
-│   └─ lib/                # Extension du protocole (Ihave/Request/Batch)
+├─ apps/
+│   ├─ gossip_node/         # Application Gossip multi-arbres
+│   │   └─ src/main.rs
+│   └─ nfs_node/            # Application NFS
+│       ├─ src/main.rs      # Serveur NFS (607 lignes)
+│       └─ Cargo.toml
 │
-├─ gossip_node/            # Binaire du nœud distribué
-│   └─ src/
-│        ├─ main.rs        # Point d'entrée et logique principale
-│        └─ ...
+├─ crates/
+│   └─ common_proto/        # Protocoles partagés
+│       ├─ src/
+│       │   ├─ lib.rs
+│       │   └─ nfs.rs       # Définitions NFS (121 lignes)
+│       └─ Cargo.toml
 │
 ├─ configs/
-│   ├─ docker/             # Configurations des 10 nœuds Docker
-│   └─ local/              # Configurations pour tests locaux
+│   └─ docker/              # Configurations des serveurs
+│       ├─ cluster.yaml     # Config Gossip (10 nœuds)
+│       ├─ nfs_cluster.yaml
+│       ├─ nfs_server1.yaml
+│       ├─ nfs_server2.yaml
+│       └─ nfs_server3.yaml
 │
 ├─ docker/
-│   └─ Dockerfile          # Construction de l’image
-│
-├─ scripts/
-│   ├─ gen_10nodes.sh      # Génération automatique des configs Docker
-│   └─ up.sh               # Construction et lancement du cluster
+│   ├─ Dockerfile           # Image Gossip
+│   ├─ Dockerfile.nfs       # Multi-stage build NFS
+│   └─ nfs-compose.yml      # Orchestration cluster NFS
 │
 └─ README.md
-
-## 8. Fonctionnalités actuelles
-
-- Diffusion distribuée via plusieurs arbres.
-- Communication interne TCP performante, binaire et compacte.
-- API HTTP simple pour tester, superviser et interagir avec un nœud.
-- Déduplication robuste contre les boucles.
-- Heartbeats périodiques pour chaque arbre.
-- Déploiement automatisé d’un cluster 10 nœuds via Docker.
-- Paramétrage complet via YAML.
-
-## 9. Démos possibles
-
-Ces démonstrations peuvent être effectuées en quelques commandes. Remplacez les ports par ceux définis dans `configs/docker/cluster.yaml` (ex. 8081, 8082, ...).
-
-### 9.1. Diffusion globale d'un message
-
-Publier depuis un nœud :
-
-```bash
-curl -X POST http://localhost:8083/publish \
-  -H "Content-Type: application/json" \
-  -d '{"payload":"Hello world"}'
 ```
-
-Observer sur d’autres nœuds (exemples) :
-
-```bash
-curl http://localhost:8081/stats
-curl http://localhost:8085/stats
-curl http://localhost:8089/stats
-```
-
-### 9.2. Publication depuis n'importe quel nœud
-
-```bash
-curl -X POST http://localhost:8087/publish \
-  -H "Content-Type: application/json" \
-  -d '{"payload":"From node7"}'
-```
-
-Vérification (exemples) :
-
-```bash
-curl http://localhost:8082/stats
-curl http://localhost:80810/stats  # Remplacez par le port configuré pour le nœud 10
-```
-
-### 9.3. Envoi intensif de messages
-
-```bash
-for i in $(seq 1 20); do
-  curl -s -X POST http://localhost:8084/publish \
-    -H "Content-Type: application/json" \
-    -d "{\"payload\":\"msg_$i\"}" > /dev/null
-done
-```
-
-Vérification :
-
-```bash
-curl http://localhost:8081/stats
-```
-
-Ces tests montrent : pas de duplication, propagation rapide et stabilité du système.
-
-## 10. Lien avec PeerReview
-
-L’objectif final est de transformer ce système en une implémentation complète du protocole PeerReview. Le système actuel fournit déjà les briques essentielles :
-
-- overlay structuré multi-arbres,
-- communication fiable et déterministe,
-- propagation contrôlée,
-- mécanisme de déduplication,
-- transport léger,
-- protocole extensible (Ihave, Request, Batch déjà définis).
-
-Prochaines étapes techniques recommandées :
-
-- journaux sécurisés (tamper-evident logs),
-- hachage chaîné et signatures,
-- audits pair-à-pair,
-- vérification des écarts de comportement,
-- preuves cryptographiques de faute.
-
-## 11. Conclusion
-
-Ce projet constitue une base solide pour la mise en œuvre du protocole PeerReview. Il propose une infrastructure distribuée réaliste, configurable, performante et extensible. Le cluster multi-arbres, la communication TCP, l’API HTTP et les mécanismes internes en font une plateforme prête à accueillir les étapes suivantes : logs sécurisés, audits et vérification comportementale.
 
 ---
 
-Annexes rapides
+## Déterminisme et PeerReview
 
-- Lancement local (exemple) :
+### Garanties NFS pour PeerReview
 
-```bash
-# Générer la configuration des 10 nœuds (script fourni)
-./scripts/gen_10nodes.sh
+L'application NFS garantit un déterminisme complet :
 
-# Lancer le cluster via docker-compose (depuis le dossier `configs/docker`)
-./scripts/up.sh
+| Exigence PeerReview | Implémentation NFS |
+|---------------------|---------------------|
+| Horloge déterministe | `DeterministicClock` (Lamport) |
+| Ordre des opérations | Verrous + Timestamps |
+| Historique | `VecDeque<String>` (100 dernières ops) |
+| RPC traçable | UUID v4 par requête |
+| Pas de sources aléatoires | Pas de `SystemTime::now()` |
+| Replay exact | Même timestamps → même ordre |
+
+### Horloge Logique de Lamport
+
+```rust
+pub struct DeterministicClock {
+    current_time: AtomicU64,
+}
+
+impl DeterministicClock {
+    pub fn update_time(&self, time: u64) {
+        self.current_time.fetch_max(time, Ordering::SeqCst);
+    }
+}
 ```
 
-- Emplacement des messages partagés : `crates/common_proto`
-- Documentation technique et points d’extension : `crates/lib`
+**Protocole** :
+1. Client envoie requête avec `timestamp=T`
+2. Serveur exécute `clock.update_time(T)` → `clock = max(clock, T)`
+3. Serveur exécute opération
+4. Serveur répond avec `timestamp=clock.now()`
+
+### Exemple d'Historique
+```
+WRITE test.txt -> OK (42 bytes)
+READ config.yaml -> ERROR: No such file
+DELETE old.log -> OK
+LIST /data -> OK (15 entries)
+```
+
+---
+
+## Tests
+
+```bash
+# Tests unitaires NFS
+cargo test --package nfs_node
+
+# Tests d'intégration
+cargo test --package nfs_node --test integration_test
+
+# Benchmarks
+cargo bench --package nfs_node
+
+# Tests Gossip
+cargo test --package gossip_node
+```
+
+---
+
+## Limitations NFS
+
+- Pas de réplication entre serveurs (prévu avec Raft)
+- Pas d'authentification utilisateur
+- Communication non chiffrée (TCP/HTTP en clair)
+- DELETE fichiers uniquement (pas de répertoires récursifs)
+- Pas de métadonnées avancées (permissions, timestamps)
+
+---
+
+## Roadmap
+
+### Court Terme
+- [ ] Logging PeerReview asynchrone
+- [ ] Signatures cryptographiques Ed25519
+- [ ] Checkpoints automatiques périodiques
+- [ ] Tests automatisés CI/CD
+
+### Moyen Terme
+- [ ] Réplication Raft pour haute disponibilité
+- [ ] Authentification TLS mutuelle (mTLS)
+- [ ] Métadonnées avancées (permissions UNIX)
+- [ ] Optimisations performance (cache LRU)
+
+### Long Terme
+- [ ] Intégration PeerReview complète (Witnesses + Challenge-Response)
+- [ ] NFS v4 Partial Compliance
+- [ ] Geo-Replication multi-datacenter
+- [ ] Dashboard Web de monitoring
+
+---
+
+## Références
+
+- **PeerReview Paper** : Haeberlen et al., "PeerReview: Practical Accountability for Distributed Systems", SOSP 2007
+- **NFS v3 Specification** : RFC 1813
+- **Lamport Clocks** : Lamport, "Time, Clocks, and the Ordering of Events in a Distributed System", CACM 1978
+- **Rust Async Book** : https://tokio.rs/tokio/tutorial
+
+---
+
+## Contact
+
+Pour toute question ou contribution, ouvrir une issue sur le dépôt Git.

@@ -1,0 +1,22 @@
+servers:
+  - id: "nfs_server1"
+    volume_path: "/data/vol1"
+    listen_addr: "0.0.0.0:9001"
+    http_api: 8091
+
+  - id: "nfs_server2"
+    volume_path: "/data/vol2"
+    listen_addr: "0.0.0.0:9002"
+    http_api: 8092
+
+  - id: "nfs_server3"
+    volume_path: "/data/vol3"
+    listen_addr: "0.0.0.0:9003"
+    http_api: 8093
+
+clients:
+  - id: "nfs_client1"
+    default_server: "nfs_server1:9001"
+
+  - id: "nfs_client2"
+    default_server: "nfs_server2:9002"

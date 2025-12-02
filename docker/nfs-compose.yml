@@ -1,0 +1,76 @@
+version: "3.8"
+
+x-nfs-common: &nfs-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.nfs
+  networks:
+    - nfs_net
+  restart: unless-stopped
+
+services:
+  nfs_server1:
+    <<: *nfs-common
+    container_name: nfs_server1
+    hostname: nfs_server1
+    ports:
+      - "8091:8091"
+      - "9001:9001"
+    volumes:
+      - nfs_vol1:/data/vol1
+    command: >
+      /app/nfs_node
+      --config /app/configs/nfs_server1.yaml
+      --cluster /app/configs/nfs_cluster.yaml
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  nfs_server2:
+    <<: *nfs-common
+    container_name: nfs_server2
+    hostname: nfs_server2
+    ports:
+      - "8092:8092"
+      - "9002:9002"
+    volumes:
+      - nfs_vol2:/data/vol2
+    command: >
+      /app/nfs_node
+      --config /app/configs/nfs_server2.yaml
+      --cluster /app/configs/nfs_cluster.yaml
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  nfs_server3:
+    <<: *nfs-common
+    container_name: nfs_server3
+    hostname: nfs_server3
+    ports:
+      - "8093:8093"
+      - "9003:9003"
+    volumes:
+      - nfs_vol3:/data/vol3
+    command: >
+      /app/nfs_node
+      --config /app/configs/nfs_server3.yaml
+      --cluster /app/configs/nfs_cluster.yaml
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8093/stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  nfs_net:
+    driver: bridge
+
+volumes:
+  nfs_vol1:
+  nfs_vol2:
+  nfs_vol3:

@@ -1,0 +1,54 @@
+# Stage 1: Build
+FROM rust:1.82-bookworm AS builder
+
+WORKDIR /build
+
+# Copier les fichiers de configuration Cargo
+COPY Cargo.toml Cargo.lock* ./
+COPY apps/nfs_node/Cargo.toml apps/nfs_node/
+COPY apps/gossip_node/Cargo.toml apps/gossip_node/
+COPY crates/common_proto/Cargo.toml crates/common_proto/
+
+# Créer des fichiers sources factices pour la mise en cache des dépendances
+RUN mkdir -p apps/nfs_node/src apps/gossip_node/src crates/common_proto/src && \
+    echo "fn main() {}" > apps/nfs_node/src/main.rs && \
+    echo "fn main() {}" > apps/gossip_node/src/main.rs && \
+    echo "" > crates/common_proto/src/lib.rs
+
+# Compiler les dépendances
+RUN cargo build --release --package nfs_node || true
+
+# Copier le code source réel
+COPY apps/nfs_node/src apps/nfs_node/src
+COPY crates/common_proto/src crates/common_proto/src
+
+# Recompiler avec le code source réel
+RUN touch apps/nfs_node/src/main.rs crates/common_proto/src/lib.rs && \
+    cargo build --release --package nfs_node
+
+# Stage 2: Runtime
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copier le binaire
+COPY --from=builder /build/target/release/nfs_node /app/nfs_node
+
+# Copier les configurations
+COPY configs/docker/nfs_server1.yaml /app/configs/
+COPY configs/docker/nfs_server2.yaml /app/configs/
+COPY configs/docker/nfs_server3.yaml /app/configs/
+COPY configs/docker/nfs_cluster.yaml /app/configs/
+
+# Créer les répertoires de données
+RUN mkdir -p /data/vol1 /data/vol2 /data/vol3
+
+# Exposer les ports
+EXPOSE 8091 8092 8093 9001 9002 9003
+
+CMD ["/app/nfs_node"]

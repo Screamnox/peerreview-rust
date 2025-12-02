@@ -523,6 +523,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nfs_node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bincode",
+ "clap",
+ "common_proto",
+ "dashmap",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "time",
+ "tokio",
+ "tower",
+ "uuid",
+]
+
+[[package]]
 name = "num-conv"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

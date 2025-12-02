@@ -1,0 +1,4 @@
+id: "nfs_server3"
+volume_path: "/data/vol3"
+listen_addr: "0.0.0.0:9003"
+http_api: 8093

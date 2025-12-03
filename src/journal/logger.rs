@@ -176,7 +176,7 @@ impl Logger {
     //---------------------------------------------------------------------------------------------------------
 
     /// Ajoute une entrée send au journal
-    pub fn log_send(&mut self, correspondent: u32, msg: &str) -> std::io::Result<()> {
+    pub fn log_send(&mut self, correspondent: u32, msg: &str) -> std::io::Result<[u8; 64]> {
         self.s_k += 1;
 
         if self.line_current >= self.line_max {
@@ -223,7 +223,7 @@ impl Logger {
 
         self.hash = hash;
         self.line_current += 1;
-        Ok(())
+        Ok(sig)
     }
 
     ///Cette fonction a pour objectif de renvoyer le nombre de log demandé passé en paramètre du plus récent au plus ancien (trié par s_k)

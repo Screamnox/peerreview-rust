@@ -12,7 +12,7 @@ fn main() -> std::io::Result<()> {
         0x55, 0x31, 0xB4, 0x7A,
     ];
 
-    logger.log_send(42, "Salut je suis une base64")?;
+    let _sig = logger.log_send(42, "Salut je suis une base64")?;
     logger.log_recv(69, 40, sig_recv, "Salut je suis une base64")?;
 
     for log in logger.get_log(10)? {

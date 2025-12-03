@@ -27,14 +27,13 @@ pub struct PeerReviewNode {
     pub node_id: u32,
     pub logger: Logger,
     pub prev_hash: [u8; 32],       
-    #[allow(dead_code)]
-    pub private_key: [u8; 32],     
+    #[allow(dead_code)]     
     pub peer_public_keys: HashMap<u32, ed25519_dalek::PublicKey>, 
 }
 
 impl PeerReviewNode {
     /// Crée un nouveau nœud PeerReview
-    pub fn new(node_id: u32, mut logger: Logger, private_key: [u8; 32]) -> Self {
+    pub fn new(node_id: u32, mut logger: Logger) -> Self {
         // Récupérer le hash initial du logger (dernier hash enregistré ou HASH_INIT)
         let prev_hash = if logger.s_k == 0 {
             // Pas encore de logs, utiliser HASH_INIT du Logger
@@ -55,7 +54,6 @@ impl PeerReviewNode {
             node_id,
             logger,
             prev_hash,
-            private_key,
             peer_public_keys: HashMap::new(),
         }
     }

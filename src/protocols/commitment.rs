@@ -31,7 +31,7 @@ impl PeerReviewNode {
         let current_seq = log_entry.s_k;      // sk (numéro de séquence de cette entrée)
         let current_hash = log_entry.hash;     // hk (hash de cette entrée)
         let current_sig = log_entry.sig;       // αk (signature de cette entrée)
-        
+        println!("signature: {}", hex::encode(current_sig));
         // Étape 4: Mettre à jour prev_hash pour la prochaine entrée
         // Le hk actuel devient le hk-1 pour la prochaine entrée
         self.prev_hash = current_hash;

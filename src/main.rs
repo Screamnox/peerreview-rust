@@ -12,13 +12,10 @@ fn main() -> std::io::Result<()> {
     let logger_node1 = Logger::new("node1_journal.log", 5000, 200)?;
     let logger_node2 = Logger::new("node2_journal.log", 5000, 200)?;
 
-    // Clés privées des nœuds (simulées)
-    let node1_private_key: [u8; 32] = [1; 32];
-    let node2_private_key: [u8; 32] = [2; 32];
 
     // Création des nœuds PeerReview
-    let mut node1 = PeerReviewNode::new(1, logger_node1, node1_private_key);
-    let mut node2 = PeerReviewNode::new(2, logger_node2, node2_private_key);
+    let mut node1 = PeerReviewNode::new(1, logger_node1);
+    let mut node2 = PeerReviewNode::new(2, logger_node2);
 
     // Enregistrer les clés publiques mutuelles
     let node1_public_key = node1.logger.get_public_key().clone();
@@ -35,6 +32,7 @@ fn main() -> std::io::Result<()> {
     // Algorithm 1: Nœud 1 envoie un message à Nœud 2
     let message = "Bonjour depuis le nœud 1!";
     let send_msg = node1.send_message(2, message)?;
+    println!("Message envoyé: {:?}", send_msg);
     println!("✓ Message créé par le nœud 1\n");
 
     // Algorithm 2 & 3: Nœud 2 reçoit et vérifie le message, puis envoie un acquittement

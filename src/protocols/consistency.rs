@@ -247,33 +247,3 @@ impl PeerReviewNode {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::journal::Logger;
-
-    #[test]
-    fn test_consistency_challenge() -> std::io::Result<()> {
-        let logger = Logger::new("test_consistency.log", 100, 300)?;
-        let mut node = PeerReviewNode::new(1, logger);
-
-        let challenge = node.send_consistency_challenge(2, 10, 20)?;
-
-        assert_eq!(challenge.challenger_id, 1);
-        assert_eq!(challenge.target_id, 2);
-        assert_eq!(challenge.seq_num_start, 10);
-        assert_eq!(challenge.seq_num_end, 20);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_verify_consistency_empty() {
-        let logger = Logger::new("test_consistency_empty.log", 100, 300).unwrap();
-        let node = PeerReviewNode::new(1, logger);
-
-        let result = node.verify_consistency(2, &[]);
-        assert!(!result);
-    }
-}

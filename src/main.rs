@@ -126,13 +126,10 @@ fn main() -> std::io::Result<()> {
         0x55, 0x31, 0xB4, 0x7A,
     ];
 
-<<<<<<< HEAD
     test_logger.log_send(42, "Salut je suis une base64")?;
     test_logger.log_recv(69, 40, sig_recv, "Salut je suis une base64")?;
-=======
     let _sig = logger.log_send(42, "Salut je suis une base64")?;
     logger.log_recv(69, 40, sig_recv, "Salut je suis une base64")?;
->>>>>>> origin/journal
 
     for log in test_logger.get_log(10)? {
         println!("{}", log);

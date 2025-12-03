@@ -123,6 +123,11 @@ impl Logger {
         })
     }
 
+    /// Retourne la clé publique du Logger
+    pub fn get_public_key(&self) -> &ed25519_dalek::PublicKey {
+        &self.keypair.public
+    }
+
     /// Ajoute une entrée recv au journal
     pub fn log_recv(
         &mut self,

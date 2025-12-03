@@ -5,6 +5,7 @@ use super::node::PeerReviewNode;
 
 /// Structure pour gérer les challenges de consistency
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConsistencyChallenge {
     pub challenger_id: u32,
     pub target_id: u32,
@@ -15,6 +16,7 @@ pub struct ConsistencyChallenge {
 impl PeerReviewNode {
     /// Envoie un challenge de consistency pour demander les entrées de log d'un nœud
     /// Demande les entrées entre seq_start et seq_end
+    #[allow(dead_code)]
     pub fn send_consistency_challenge(
         &mut self,
         target_id: u32,
@@ -48,6 +50,7 @@ impl PeerReviewNode {
     }
 
     /// Répond à un challenge de consistency en envoyant les entrées de log demandées
+    #[allow(dead_code)]
     pub fn respond_to_consistency_challenge(
         &mut self,
         challenge: &ConsistencyChallenge,
@@ -79,6 +82,7 @@ impl PeerReviewNode {
 
     /// Vérifie la consistency des logs reçus d'un autre nœud
     /// Vérifie la chaîne de hash et les signatures Ed25519
+    #[allow(dead_code)]
     pub fn verify_consistency(
         &self,
         target_id: u32,
@@ -123,6 +127,7 @@ impl PeerReviewNode {
     }
 
     /// Vérifie la consistency entre deux nœuds sur une plage de logs donnée
+    #[allow(dead_code)]
     pub fn cross_check_consistency(
         &mut self,
         node_a_id: u32,
@@ -157,6 +162,7 @@ impl PeerReviewNode {
     }
 
     /// Détecte les incohérences dans les logs en comparant avec d'autres nœuds témoins
+    #[allow(dead_code)]
     pub fn detect_inconsistency(
         &self,
         target_id: u32,
@@ -212,6 +218,7 @@ impl PeerReviewNode {
     }
 
     /// Crée un rapport d'audit suite à une détection d'incohérence
+    #[allow(dead_code)]
     pub fn create_audit_report(
         &mut self,
         target_id: u32,

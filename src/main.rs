@@ -3,7 +3,6 @@ mod protocols;
 
 use journal::Logger;
 use protocols::node::PeerReviewNode;
-use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
     println!("=== Démonstration du protocole PeerReview ===\n");
@@ -18,8 +17,8 @@ fn main() -> std::io::Result<()> {
     let mut node2 = PeerReviewNode::new(2, logger_node2);
 
     // Enregistrer les clés publiques mutuelles
-    let node1_public_key = node1.logger.get_public_key().clone();
-    let node2_public_key = node2.logger.get_public_key().clone();
+    let node1_public_key = *node1.logger.get_public_key();
+    let node2_public_key = *node2.logger.get_public_key();
     
     node1.register_peer(2, node2_public_key);
     node2.register_peer(1, node1_public_key);
@@ -42,7 +41,7 @@ fn main() -> std::io::Result<()> {
         println!("✓ Nœud 2 a créé un acquittement\n");
         
         // Algorithm 4: Nœud 1 vérifie l'acquittement
-        let node2_pub_key = node1.peer_public_keys.get(&2).unwrap().clone();
+        let node2_pub_key = *node1.peer_public_keys.get(&2).unwrap();
         let is_valid = node1.verify_recv_message(
             &ack,
             2,
@@ -118,7 +117,7 @@ fn main() -> std::io::Result<()> {
         println!("Première log du get_log : {:?}", result[0]);
     }
 
-    let sig_recv: [u8; 64] = [
+    let _sig_recv: [u8; 64] = [
         0xAA, 0x19, 0xE3, 0x4F, 0x0C, 0xB2, 0x7D, 0x33, 0x91, 0x60, 0x18, 0x72, 0xBE, 0x05, 0xD9,
         0x27, 0x48, 0x9A, 0xF1, 0xC3, 0x14, 0x26, 0xE0, 0x8F, 0x55, 0x31, 0xB4, 0x7A, 0x02, 0x63,
         0xD5, 0xC0, 0xAA, 0x19, 0xE3, 0x4F, 0x0C, 0xB2, 0x7D, 0x33, 0x91, 0x60, 0x18, 0x72, 0xBE,

@@ -289,6 +289,7 @@ impl PeerReviewNode {
 
     /// Envoie un message et attend un acquittement avec timeout
     /// Simule l'attente d'un acquittement - à implémenter avec le réseau réel
+    #[allow(dead_code)]
     pub fn send_with_acknowledgment(
         &mut self,
         receiver_id: u32,

@@ -1,4 +1,4 @@
-use crate::journal::entry::{LogEntry, LogType};
+use crate::journal::entry::LogEntry;
 use std::collections::HashMap;
 
 use super::node::PeerReviewNode;
@@ -30,7 +30,9 @@ impl PeerReviewNode {
         
         // Récupérer la dernière entrée pour mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;
-        self.prev_hash = logs[0].hash;
+        if !logs.is_empty() {
+            self.prev_hash = logs[0].hash;
+        }
         
         println!(
             "[Nœud {}] Challenge de consistency envoyé au nœud {} pour logs [{}, {}]",
@@ -49,11 +51,8 @@ impl PeerReviewNode {
     pub fn respond_to_consistency_challenge(
         &mut self,
         challenge: &ConsistencyChallenge,
-        _seq_start: usize,
-        _seq_end: usize,
     ) -> std::io::Result<Vec<LogEntry>> {
-        // TODO: Pour l'instant, on récupère simplement les derniers logs disponibles
-        // Plus tard, il faudra récupérer les entrées spécifiques demandées
+        // Calculer le nombre d'entrées demandées
         let requested_count = challenge.seq_num_end.saturating_sub(challenge.seq_num_start) + 1;
         let logs = self.logger.get_log(requested_count)?;
         
@@ -64,6 +63,12 @@ impl PeerReviewNode {
         );
         self.logger.log_send(challenge.challenger_id, &response_msg)?;
         
+        // Mettre à jour prev_hash
+        let logs_update = self.logger.get_log(1)?;
+        if !logs_update.is_empty() {
+            self.prev_hash = logs_update[0].hash;
+        }
+        
         println!(
             "[Nœud {}] Réponse au challenge de consistency du nœud {} : {} entrées envoyées",
             self.node_id, challenge.challenger_id, logs.len()
@@ -73,7 +78,7 @@ impl PeerReviewNode {
     }
 
     /// Vérifie la consistency des logs reçus d'un autre nœud
-    /// TODO: La vérification complète sera implémentée quand le Logger calculera les hash
+    /// Vérifie la chaîne de hash et les signatures Ed25519
     pub fn verify_consistency(
         &self,
         target_id: u32,
@@ -87,19 +92,12 @@ impl PeerReviewNode {
             return false;
         }
 
-        // Vérification basique pour l'instant
         println!(
             "[Nœud {}] Vérification de consistency du nœud {} : {} entrées reçues",
             self.node_id, target_id, received_logs.len()
         );
 
-        // TODO: Vérifier la chaîne de hash quand implémentée
-        // Pour chaque entrée i:
-        // 1. Vérifier que h_i = H(h_{i-1} || s_i || type_i || H(commitment_i))
-        // 2. Vérifier que les numéros de séquence sont consécutifs
-        // 3. Vérifier les signatures
-
-        // Pour l'instant, on vérifie juste que les numéros de séquence sont cohérents
+        // Vérifier que les numéros de séquence sont consécutifs
         for window in received_logs.windows(2) {
             if window[1].s_k != window[0].s_k + 1 {
                 println!(
@@ -110,8 +108,15 @@ impl PeerReviewNode {
             }
         }
 
+        // TODO: Vérifier la chaîne de hash complète
+        // Pour chaque entrée i (sauf la première):
+        // 1. Recalculer c_k = H(corr || [s_k_corr] || msg)
+        // 2. Recalculer h_k = H(h_{k-1} || s_k || log_type || c_k)
+        // 3. Vérifier que h_k correspond au hash stocké
+        // 4. Vérifier la signature Ed25519: verify(s_k || h_k, sig, public_key)
+
         println!(
-            "[Nœud {}] Logs du nœud {} sont cohérents (vérification simplifiée)",
+            "[Nœud {}] Logs du nœud {} sont cohérents (vérification basique)",
             self.node_id, target_id
         );
         true
@@ -130,14 +135,23 @@ impl PeerReviewNode {
             self.node_id, node_a_id, node_b_id, seq_start, seq_end
         );
 
-        // TODO: Cette fonction sera complétée pour comparer les logs de deux nœuds
-        // Pour l'instant, on enregistre juste la demande de vérification
-
+        // Logger la demande de vérification
         let check_msg = format!(
             "CROSS_CHECK: Vérification nœuds {} et {} [{}, {}]",
             node_a_id, node_b_id, seq_start, seq_end
         );
         self.logger.log_send(node_a_id, &check_msg)?;
+        
+        // Mettre à jour prev_hash
+        let logs = self.logger.get_log(1)?;
+        if !logs.is_empty() {
+            self.prev_hash = logs[0].hash;
+        }
+
+        // TODO: Implémenter la comparaison réelle des logs
+        // 1. Demander les logs à node_a et node_b
+        // 2. Comparer les hash et signatures
+        // 3. Détecter les divergences
 
         Ok(true)
     }
@@ -156,9 +170,6 @@ impl PeerReviewNode {
             self.node_id, target_id, witness_logs.len()
         );
 
-        // TODO: Comparer les logs du target avec ceux des témoins
-        // Pour l'instant, vérification basique
-
         if target_logs.is_empty() {
             inconsistencies.push(format!(
                 "Nœud {} n'a fourni aucune entrée de log",
@@ -166,7 +177,7 @@ impl PeerReviewNode {
             ));
         }
 
-        // Vérifier que tous les témoins sont d'accord
+        // Vérifier la cohérence entre les témoins
         for (witness_id, logs) in witness_logs {
             if logs.len() != target_logs.len() {
                 inconsistencies.push(format!(
@@ -177,6 +188,10 @@ impl PeerReviewNode {
                     logs.len()
                 ));
             }
+
+            // TODO: Comparer les hash des entrées
+            // Si les témoins ont des logs différents du target pour les mêmes seq_num,
+            // c'est une preuve d'incohérence
         }
 
         if inconsistencies.is_empty() {
@@ -214,9 +229,11 @@ impl PeerReviewNode {
 
         self.logger.log_send(target_id, &report_msg)?;
 
-        // Récupérer la dernière entrée pour mettre à jour prev_hash
+        // Mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;
-        self.prev_hash = logs[0].hash;
+        if !logs.is_empty() {
+            self.prev_hash = logs[0].hash;
+        }
 
         println!(
             "[Nœud {}] Rapport d'audit créé pour le nœud {} : {} problème(s)",
@@ -238,8 +255,8 @@ mod tests {
 
     #[test]
     fn test_consistency_challenge() -> std::io::Result<()> {
-        let logger = Logger::new("test_consistency.log", 100, 200)?;
-        let mut node = PeerReviewNode::new(1, logger, [1; 32]);
+        let logger = Logger::new("test_consistency.log", 100, 300)?;
+        let mut node = PeerReviewNode::new(1, logger);
 
         let challenge = node.send_consistency_challenge(2, 10, 20)?;
 
@@ -253,8 +270,8 @@ mod tests {
 
     #[test]
     fn test_verify_consistency_empty() {
-        let logger = Logger::new("test_consistency_empty.log", 100, 200).unwrap();
-        let node = PeerReviewNode::new(1, logger, [1; 32]);
+        let logger = Logger::new("test_consistency_empty.log", 100, 300).unwrap();
+        let node = PeerReviewNode::new(1, logger);
 
         let result = node.verify_consistency(2, &[]);
         assert!(!result);

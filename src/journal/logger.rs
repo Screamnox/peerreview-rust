@@ -237,12 +237,12 @@ impl Logger {
         let reader = BufReader::new(&self.file);
         let mut count: usize = 0;
         let lines = reader.lines().collect::<Result<Vec<String>, _>>()?;
-        
+
         // Si aucun log n'a été écrit, retourner un vecteur vide
         if self.line_current == 0 {
             return Ok(Vec::new());
         }
-        
+
         let mut id: usize = self.line_current - 1;
         nb_log = nb_log.min(lines.len());
         let mut result = Vec::with_capacity(nb_log);

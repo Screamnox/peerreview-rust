@@ -27,20 +27,20 @@ impl PeerReviewNode {
             "CHALLENGE_CONSISTENCY: Demande logs [{}, {}]",
             seq_start, seq_end
         );
-        
+
         self.logger.log_send(target_id, &challenge_msg)?;
-        
+
         // Récupérer la dernière entrée pour mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;
         if !logs.is_empty() {
             self.prev_hash = logs[0].hash;
         }
-        
+
         println!(
             "[Nœud {}] Challenge de consistency envoyé au nœud {} pour logs [{}, {}]",
             self.node_id, target_id, seq_start, seq_end
         );
-        
+
         Ok(ConsistencyChallenge {
             challenger_id: self.node_id,
             target_id,
@@ -56,38 +56,37 @@ impl PeerReviewNode {
         challenge: &ConsistencyChallenge,
     ) -> std::io::Result<Vec<LogEntry>> {
         // Calculer le nombre d'entrées demandées
-        let requested_count = challenge.seq_num_end.saturating_sub(challenge.seq_num_start) + 1;
+        let requested_count = challenge
+            .seq_num_end
+            .saturating_sub(challenge.seq_num_start)
+            + 1;
         let logs = self.logger.get_log(requested_count)?;
-        
+
         // Logger la réponse
-        let response_msg = format!(
-            "RESPONSE_CONSISTENCY: {} entrées envoyées",
-            logs.len()
-        );
-        self.logger.log_send(challenge.challenger_id, &response_msg)?;
-        
+        let response_msg = format!("RESPONSE_CONSISTENCY: {} entrées envoyées", logs.len());
+        self.logger
+            .log_send(challenge.challenger_id, &response_msg)?;
+
         // Mettre à jour prev_hash
         let logs_update = self.logger.get_log(1)?;
         if !logs_update.is_empty() {
             self.prev_hash = logs_update[0].hash;
         }
-        
+
         println!(
             "[Nœud {}] Réponse au challenge de consistency du nœud {} : {} entrées envoyées",
-            self.node_id, challenge.challenger_id, logs.len()
+            self.node_id,
+            challenge.challenger_id,
+            logs.len()
         );
-        
+
         Ok(logs)
     }
 
     /// Vérifie la consistency des logs reçus d'un autre nœud
     /// Vérifie la chaîne de hash et les signatures Ed25519
     #[allow(dead_code)]
-    pub fn verify_consistency(
-        &self,
-        target_id: u32,
-        received_logs: &[LogEntry],
-    ) -> bool {
+    pub fn verify_consistency(&self, target_id: u32, received_logs: &[LogEntry]) -> bool {
         if received_logs.is_empty() {
             println!(
                 "[Nœud {}] Erreur: Aucune entrée reçue du nœud {}",
@@ -98,7 +97,9 @@ impl PeerReviewNode {
 
         println!(
             "[Nœud {}] Vérification de consistency du nœud {} : {} entrées reçues",
-            self.node_id, target_id, received_logs.len()
+            self.node_id,
+            target_id,
+            received_logs.len()
         );
 
         // Vérifier que les numéros de séquence sont consécutifs
@@ -146,7 +147,7 @@ impl PeerReviewNode {
             node_a_id, node_b_id, seq_start, seq_end
         );
         self.logger.log_send(node_a_id, &check_msg)?;
-        
+
         // Mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;
         if !logs.is_empty() {
@@ -173,7 +174,9 @@ impl PeerReviewNode {
 
         println!(
             "[Nœud {}] Détection d'incohérences pour le nœud {} avec {} témoins",
-            self.node_id, target_id, witness_logs.len()
+            self.node_id,
+            target_id,
+            witness_logs.len()
         );
 
         if target_logs.is_empty() {
@@ -244,7 +247,9 @@ impl PeerReviewNode {
 
         println!(
             "[Nœud {}] Rapport d'audit créé pour le nœud {} : {} problème(s)",
-            self.node_id, target_id, inconsistencies.len()
+            self.node_id,
+            target_id,
+            inconsistencies.len()
         );
 
         for (i, inc) in inconsistencies.iter().enumerate() {

@@ -1,6 +1,19 @@
 nodes:
-  - { id: "node1", addr: "node1:7001" }
-  - { id: "node2", addr: "node2:7001" }
-  - { id: "node3", addr: "node3:7001" }
-  - { id: "node4", addr: "node4:7001" }
+  - id: "node1"
+    app_addr: "node1:7001"
+    pr_addr: "node1:7002"
+
+  - id: "node2"
+    app_addr: "node2:7001"
+    pr_addr: "node2:7002"
+
+  - id: "node3"
+    app_addr: "node3:7001"
+    pr_addr: "node3:7002"
+
+  - id: "node4"
+    app_addr: "node4:7001"
+    pr_addr: "node4:7002"
+
 fanout: 2
+num_trees: 3

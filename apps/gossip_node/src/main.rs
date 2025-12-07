@@ -5,13 +5,19 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use common_proto::{Msg, MsgKind, NodeId};
+use common_proto::{BinaryChunk, Msg, MsgKind, NodeId};
 use dashmap::DashSet;
 use parking_lot::Mutex;
-use rand::{seq::SliceRandom, SeedableRng};
+use rand::{seq::SliceRandom, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
-use std::{collections::VecDeque, fs, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    fs,
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -41,17 +47,24 @@ struct NodeCfg {
 #[derive(Debug, Deserialize, Clone)]
 struct Peer {
     id: String,
-    addr: String, // ex "node3:7001" (docker) ou "127.0.0.1:7001" (local)
+    addr: String, // ex "node3:7001" ou "127.0.0.1:7001"
 }
 
 #[derive(Debug, Deserialize)]
 struct ClusterCfg {
     nodes: Vec<Peer>,
-    fanout: usize,     // k
-    num_trees: usize,  // T
+    fanout: usize,    // k
+    num_trees: usize, // T
 }
 
 // ----------------- Etat du noeud -----------------
+
+/// Buffer pour reconstituer un flux binaire reçu par chunks.
+struct BinaryFileBuffer {
+    total_chunks: u32,
+    received: HashMap<u32, Vec<u8>>,
+}
+
 #[derive(Clone)]
 struct NodeState {
     my_id: NodeId,
@@ -59,7 +72,11 @@ struct NodeState {
     children_by_tree: Arc<Vec<Vec<Peer>>>,
     // anti-doublon: (tree_id, msg_id)
     known_msgs: Arc<DashSet<(u8, String)>>,
+    // inbox texte/binaire pour /stats
     inbox: Arc<Mutex<VecDeque<String>>>,
+    // buffers pour flux binaires (file_id -> BinaryFileBuffer)
+    binary_buffers: Arc<Mutex<HashMap<String, BinaryFileBuffer>>>,
+    // canal d'envoi TCP
     tx_send: mpsc::Sender<(Peer, Vec<u8>)>,
 }
 
@@ -140,7 +157,7 @@ async fn publish(State(st): State<NodeState>, Json(input): Json<PublishIn>) -> J
         let msg = Msg {
             id: uuid::Uuid::new_v4().to_string(),
             from: st.my_id.clone(),
-            kind: MsgKind::Publish,
+            kind: MsgKind::PublishText,
             payload: input.payload.clone().into_bytes(),
             ts_ms: now_ms(),
             tree_id: tt,
@@ -149,7 +166,11 @@ async fn publish(State(st): State<NodeState>, Json(input): Json<PublishIn>) -> J
         st.known_msgs.insert((tt, msg.id.clone()));
         {
             let mut q = st.inbox.lock();
-            q.push_back(format!("(local t{}) {}", tt, String::from_utf8_lossy(&msg.payload)));
+            q.push_back(format!(
+                "(local t{}) {}",
+                tt,
+                String::from_utf8_lossy(&msg.payload)
+            ));
             if q.len() > 200 {
                 q.pop_front();
             }
@@ -159,6 +180,80 @@ async fn publish(State(st): State<NodeState>, Json(input): Json<PublishIn>) -> J
             let _ = st.tx_send.send((p.clone(), bytes.clone())).await;
         }
     }
+    Json("ok")
+}
+
+#[derive(Deserialize)]
+struct PublishBinaryDemoIn {
+    file_id: String,
+    total_size: usize,
+    chunk_size: usize,
+}
+
+/// Démo : envoie un flux binaire simulé (octets aléatoires) découpé en chunks,
+/// diffusé sur tous les arbres.
+async fn publish_binary_demo(
+    State(st): State<NodeState>,
+    Json(input): Json<PublishBinaryDemoIn>,
+) -> Json<&'static str> {
+    let total_size = input.total_size;
+    let chunk_size = input.chunk_size.max(1);
+    let num_chunks = (total_size + chunk_size - 1) / chunk_size;
+
+    // Génère un buffer binaire aléatoire (simulation de fichier/vidéo)
+    let mut data = vec![0u8; total_size];
+    rand::thread_rng().fill_bytes(&mut data);
+
+    for tt in 0u8..(st.children_by_tree.len() as u8) {
+        for i in 0..num_chunks {
+            let start = i * chunk_size;
+            let end = ((i + 1) * chunk_size).min(total_size);
+            let slice = &data[start..end];
+
+            let chunk = BinaryChunk {
+                file_id: input.file_id.clone(),
+                index: i as u32,
+                total_chunks: num_chunks as u32,
+                data: slice.to_vec(),
+            };
+
+            let payload = bincode::serialize(&chunk).unwrap();
+
+            let msg = Msg {
+                id: uuid::Uuid::new_v4().to_string(),
+                from: st.my_id.clone(),
+                kind: MsgKind::PublishBinaryChunk,
+                payload,
+                ts_ms: now_ms(),
+                tree_id: tt,
+            };
+
+            // dédoublon local
+            st.known_msgs.insert((tt, msg.id.clone()));
+
+            // log minimal dans l'inbox (côté émetteur)
+            {
+                let mut q = st.inbox.lock();
+                q.push_back(format!(
+                    "(local BIN t{} {} chunk {}/{} size={})",
+                    tt,
+                    input.file_id,
+                    i + 1,
+                    num_chunks,
+                    slice.len(),
+                ));
+                if q.len() > 200 {
+                    q.pop_front();
+                }
+            }
+
+            let bytes = bincode::serialize(&msg).unwrap();
+            for p in st.children_by_tree[tt as usize].iter() {
+                let _ = st.tx_send.send((p.clone(), bytes.clone())).await;
+            }
+        }
+    }
+
     Json("ok")
 }
 
@@ -198,12 +293,12 @@ async fn main() -> Result<()> {
             .collect::<Vec<_>>()
     );
 
-    // Listener TCP (messages binaires)
+    // Listener TCP (messages binaires + texte)
     let listen: SocketAddr = node_cfg.listen_addr.parse()?;
     let listener = TcpListener::bind(listen).await?;
     println!("{} listening on TCP {}", node_cfg.id, listen);
 
-   // Canal d'envoi
+    // Canal d'envoi
     let (tx, mut rx) = mpsc::channel::<(Peer, Vec<u8>)>(2048);
 
     // Etat partagé
@@ -212,6 +307,7 @@ async fn main() -> Result<()> {
         children_by_tree: Arc::new(children_by_tree),
         known_msgs: Arc::new(DashSet::new()),
         inbox: Arc::new(Mutex::new(VecDeque::new())),
+        binary_buffers: Arc::new(Mutex::new(HashMap::new())),
         tx_send: tx.clone(),
     };
 
@@ -266,6 +362,7 @@ async fn main() -> Result<()> {
         let router = Router::new()
             .route("/stats", get(stats))
             .route("/publish", post(publish))
+            .route("/publish_binary_demo", post(publish_binary_demo))
             .with_state(st.clone());
         println!(
             "{} HTTP on http://0.0.0.0:{}/",
@@ -307,8 +404,9 @@ async fn main() -> Result<()> {
                                 );
                                 // pas de reforward obligatoire pour les HB
                             }
-                            MsgKind::Publish => {
-                                // stocke un aperçu local
+
+                            MsgKind::PublishText => {
+                                // stocke un aperçu texte local
                                 let text =
                                     String::from_utf8_lossy(&msg.payload).to_string();
                                 {
@@ -321,6 +419,104 @@ async fn main() -> Result<()> {
                                         q.pop_front();
                                     }
                                 }
+                                // forward aux enfants de CET arbre
+                                let bytes = bincode::serialize(&msg).unwrap();
+                                for p in stc.children_by_tree[msg.tree_id as usize].iter() {
+                                    if p.id != stc.my_id {
+                                        let _ = stc.tx_send.send((p.clone(), bytes.clone()));
+                                    }
+                                }
+                            }
+
+                            MsgKind::PublishBinaryChunk => {
+                                // désérialiser le chunk
+                                let chunk: BinaryChunk =
+                                    match bincode::deserialize(&msg.payload) {
+                                        Ok(c) => c,
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[{}] invalid BinaryChunk from {}: {e}",
+                                                stc.my_id, msg.from
+                                            );
+                                            return;
+                                        }
+                                    };
+
+                                // log minimal terminal
+                                println!(
+                                    "[{}] BIN chunk from {} file_id={} {}/{} size={}",
+                                    stc.my_id,
+                                    msg.from,
+                                    chunk.file_id,
+                                    chunk.index + 1,
+                                    chunk.total_chunks,
+                                    chunk.data.len()
+                                );
+
+                                // log dans /stats pour voir la diffusion binaire
+                                {
+                                    let mut q = stc.inbox.lock();
+                                    q.push_back(format!(
+                                        "(BIN t{} from {} file_id={} chunk {}/{} size={})",
+                                        msg.tree_id,
+                                        msg.from,
+                                        chunk.file_id,
+                                        chunk.index + 1,
+                                        chunk.total_chunks,
+                                        chunk.data.len()
+                                    ));
+                                    if q.len() > 200 {
+                                        q.pop_front();
+                                    }
+                                }
+
+                                // mise à jour du buffer de reconstitution
+                                {
+                                    let mut buffers = stc.binary_buffers.lock();
+                                    let entry = buffers
+                                        .entry(chunk.file_id.clone())
+                                        .or_insert(BinaryFileBuffer {
+                                            total_chunks: chunk.total_chunks,
+                                            received: HashMap::new(),
+                                        });
+                                    entry
+                                        .received
+                                        .insert(chunk.index, chunk.data.clone());
+
+                                    // si on a tout reçu, on reconstitue en mémoire
+                                    if entry.received.len() as u32 == entry.total_chunks {
+                                        let mut full = Vec::new();
+                                        for i in 0..entry.total_chunks {
+                                            if let Some(part) = entry.received.get(&i) {
+                                                full.extend_from_slice(part);
+                                            } else {
+                                                eprintln!(
+                                                    "[{}] manque chunk {} pour {}",
+                                                    stc.my_id, i, chunk.file_id
+                                                );
+                                            }
+                                        }
+                                        println!(
+                                            "[{}] Reconstitution complète de {} : {} octets",
+                                            stc.my_id,
+                                            chunk.file_id,
+                                            full.len()
+                                        );
+                                        // trace aussi dans /stats
+                                        let mut q = stc.inbox.lock();
+                                        q.push_back(format!(
+                                            "(BIN COMPLETE from {} file_id={} total_bytes={})",
+                                            msg.from,
+                                            chunk.file_id,
+                                            full.len()
+                                        ));
+                                        if q.len() > 200 {
+                                            q.pop_front();
+                                        }
+                                        // Option : buffers.remove(&chunk.file_id);
+                                    }
+                                }
+
                                 // forward aux enfants de CET arbre
                                 let bytes = bincode::serialize(&msg).unwrap();
                                 for p in stc.children_by_tree[msg.tree_id as usize].iter() {

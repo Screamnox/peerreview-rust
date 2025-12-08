@@ -1,302 +1,373 @@
-# PeerReview-Rust
+# peerreview-rust – Infrastructure distribuée multi-arbres (Rust)
 
-Infrastructure distribuée multi-arbres pour l’intégration de PeerReview
+Ce projet implémente une infrastructure distribuée en Rust, pensée comme base pour l’intégration de **PeerReview** (Haeberlen et al.).  
+La branche `feature/multitree-10nodes` fournit :
 
----
-
-Table of Contents
-
-- [Introduction](#introduction)
-- [Objectifs du projet](#objectifs-du-projet)
-- [Architecture générale](#architecture-générale)
-- [Topologie multi-arbres](#topologie-multi-arbres)
-  - [Motivation](#motivation)
-  - [Construction des arbres](#construction-des-arbres)
-  - [Configuration](#configuration)
-- [Communication interne (TCP)](#communication-interne-tcp)
-- [API HTTP](#api-http)
-- [Structure du dépôt](#structure-du-dépôt)
-- [Fonctionnalités actuelles](#fonctionnalités-actuelles)
-- [Démos possibles](#démos-possibles)
-  - [Diffusion globale d'un message](#diffusion-globale-dun-message)
-  - [Publication depuis n'importe quel nœud](#publication-depuis-nimporte-quel-nœud)
-  - [Envoi intensif de messages](#envoi-intensif-de-messages)
-- [Lien avec PeerReview](#lien-avec-peerreview)
-- [Conclusion](#conclusion)
+- un **cluster Docker** de 10 nœuds,
+- un **overlay multi-arbres** pour la diffusion,
+- un **protocole applicatif simple** (texte + binaire),
+- une **API HTTP** pour piloter et observer les nœuds.
 
 ---
 
-## 1. Introduction
+## 1. Ce que cette branche fait concrètement
 
-Ce projet implémente une infrastructure distribuée en Rust destinée à servir de base au protocole PeerReview (Haeberlen et al., SOSP 2007).  
-Il repose sur :
+Aujourd’hui, cette branche permet de :
 
-- une diffusion structurée en plusieurs arbres (multi-tree),
-- un réseau TCP interne léger et performant,
-- une API HTTP simplifiée pour les interactions extérieures,
-- une configuration flexible via YAML,
-- un cluster Docker reproductible à 10 nœuds.
+- Lancer un **cluster de nœuds Rust** (10 nœuds) via Docker.
+- Construire au démarrage un **ensemble de T arbres de diffusion** au-dessus du cluster.
+- Diffuser des messages applicatifs :
+  - texte (`PublishText`) ;
+  - binaire en chunks (`PublishBinaryChunk`, par exemple pour simuler une vidéo ou un fichier).
+- Assurer :
+  - une **déduplication** des messages par `(tree_id, msg_id)` ;
+  - la circulation de **heartbeats** périodiques par arbre.
+- Exposer une API HTTP sur chaque nœud :
+  - `GET /stats` : état local (messages reçus, taille du cache, nombre d’arbres) ;
+  - `POST /publish` : injection d’un message texte dans tous les arbres ;
+  - `POST /publish_binary_demo` : injection d’un flux binaire découpé en chunks.
 
-L’objectif est de disposer d’un environnement distribué cohérent, sur lequel les mécanismes PeerReview pourront être implémentés : journaux sécurisés, audits, détection de comportements fautifs et preuves cryptographiques.
+En résumé :  
+on a maintenant un **système distribué multi-arbres fonctionnel**, avec diffusion texte + binaire, prêt à accueillir la logique PeerReview (logs sécurisés, authenticators, IHAVE/REQUEST/BATCH, audit, etc.).
 
-## 2. Objectifs du projet
+---
 
-Le projet vise à fournir :
+## 2. Architecture globale
 
-- une topologie distribuée stable et configurable ;
-- des canaux de diffusion multiples pour la résilience et la performance ;
-- un protocole P2P clair et extensible ;
-- une base technique pour intégrer PeerReview.
+### 2.1. Processus par nœud
 
-Le système actuel constitue la couche réseau et topologique du futur PeerReview.
+Chaque nœud lance :
 
-## 3. Architecture générale
+- une **socket TCP** pour les messages du protocole applicatif (texte, binaire, heartbeats) ;
+- une **boucle d’envoi** qui se connecte aux pairs et écrit les messages (`length-prefix + payload` en bincode) ;
+- une **boucle de réception** qui lit les messages, les désérialise, applique la déduplication puis les relaie ;
+- un **serveur HTTP** (Axum) pour `/stats`, `/publish`, `/publish_binary_demo` ;
+- une tâche périodique de **heartbeats** par arbre.
 
-Chaque nœud exécute :
+### 2.2. Fichiers / modules importants
 
-- un serveur TCP : communication P2P interne ;
-- un serveur HTTP : interactions externes (publish, stats) ;
-- un moteur de diffusion multi-arbres ;
-- des tâches périodiques (heartbeats) ;
-- un module de déduplication (évite les boucles et répétitions).
+- `apps/gossip_node/src/main.rs`  
+  Point d’entrée d’un nœud :
+  - parsing des configs (node + cluster),
+  - construction des arbres,
+  - lancement des tâches (TCP, HTTP, heartbeats),
+  - logique de diffusion des messages texte et binaires.
 
-Le cluster est orchestré via Docker Compose, permettant un déploiement reproductible à 10 nœuds. Chaque nœud est autonome : pas de coordinateur central.
+- `crates/common_proto/src/lib.rs`  
+  Définit les types partagés entre les nœuds :
+  - `NodeId` ;
+  - `MsgKind` (`Heartbeat`, `PublishText`, `PublishBinaryChunk`) ;
+  - `Msg` (message applicatif sérialisé en bincode) ;
+  - `BinaryChunk` (morceau d’un flux binaire).
 
-## 4. Topologie multi-arbres
+- `configs/docker/nodeX.yaml`  
+  Configuration d’un nœud `nodeX` :
+  - `id` ;
+  - `listen_addr` : adresse TCP pour le protocole applicatif ;
+  - `heartbeat_ms`, `gossip_ms`, `anti_entropy_ms` (paramètres de périodicité) ;
+  - `http_api` : port HTTP exposé dans le conteneur (et mappé sur `localhost:808X`).
 
-### 4.1. Motivation
+- `configs/docker/cluster.yaml`  
+  Description du cluster :
+  - liste des nœuds (`id`, `addr`) ;
+  - `fanout` : nombre d’enfants par nœud dans chaque arbre ;
+  - `num_trees` : nombre d’arbres parallèles dans l’overlay.
 
-Le système repose sur plusieurs arbres de diffusion pour :
+- `docker/docker-compose.yml`  
+  Lance 10 conteneurs `node1` à `node10`, avec les bons volumes et ports HTTP exposés.
 
-- améliorer la résilience (un arbre peut tomber) ;
-- répartir la charge ;
-- fournir des chemins logiques distincts, nécessaires aux opérations PeerReview ;
-- limiter la congestion d’un seul arbre.
+- `scripts/up.sh` / `scripts/down.sh`  
+  Scripts pour build + lancer / arrêter le cluster Docker.
 
-### 4.2. Construction des arbres
+---
 
-La topologie est dérivée de `cluster.yaml`, qui contient :
+## 3. Multi-tree : construction et fonctionnement
 
-- la liste des nœuds,
-- le nombre d'arbres (`num_trees`),
-- le facteur de branchement (`fanout`).
+### 3.1. Construction des arbres
 
-Pour chaque arbre :
-
-1. Un ordre aléatoire de tous les nœuds est généré.
-2. Cet ordre est transformé en arbre k-aire selon le `fanout`.
-3. Chaque nœud ne connaît que ses propres enfants pour cet arbre.
-
-Chaque nœud possède donc une structure (exemple conceptuel) :
-
-```text
-children_by_tree = {
-  0: [child1, child2, ...],
-  1: [childA, childB, ...],
-  ...
-}
-```
-
-### 4.3. Configuration
-
-Extrait de `configs/docker/cluster.yaml` (exemple) :
+À partir de `cluster.yaml`, le nœud lit :
 
 ```yaml
-fanout: 3
-num_trees: 3
-
 nodes:
   - { id: "node1", addr: "node1:7001" }
   - { id: "node2", addr: "node2:7001" }
-  # ...
-```
+  - { id: "node3", addr: "node3:7001" }
+  - { id: "node4", addr: "node4:7001" }
 
-Modifier `fanout` ou `num_trees` régénère entièrement la topologie.
+fanout: 2
+num_trees: 3
+Dans le code (main.rs) :
 
-## 5. Communication interne (TCP)
+On construit, pour chaque arbre t :
 
-Les nœuds communiquent en TCP avec un protocole binaire léger basé sur `bincode`. Chaque message est une structure partagée définie dans `crates/common_proto`.
+un ordre permuté déterministe des nœuds (make_orders) à partir d’une seed fixe.
 
-Exemple (conceptuel) :
+Pour chaque nœud i, on en déduit ses enfants k-aires via kary_children(...) :
 
-```rust
-enum MsgKind {
-    Heartbeat { counter: u64, tree_id: u8 },
-    Publish,
-    // ... autres types (Ihave, Request, Batch) ...
+children_by_tree[t] = Vec<Peer>.
+
+Chaque nœud connaît donc, pour chaque arbre :
+
+rust
+Copy code
+children_by_tree[tree_id] = [liste de peers enfants]
+La structure des arbres est fixe pendant l’exécution (construite au démarrage).
+
+3.2. Diffusion texte
+Lorsqu’un client appelle POST /publish sur un nœud :
+
+le nœud crée un Msg { kind: PublishText, tree_id = t } pour chaque arbre t ;
+
+il marque le message comme connu (known_msgs.insert((t, msg.id))) ;
+
+il le pousse dans inbox pour /stats ;
+
+il l’envoie en TCP à tous ses enfants children_by_tree[t].
+
+À la réception d’un Msg :
+
+le nœud teste (tree_id, msg_id) dans known_msgs ;
+
+s’il est déjà connu, il est ignoré (déduplication) ;
+
+sinon :
+
+s’il s’agit d’un PublishText, le nœud :
+
+ajoute un aperçu dans inbox ;
+
+le relaie à ses enfants dans cet arbre.
+
+3.3. Diffusion binaire (chunks)
+Pour les messages binaires, on procède en chunks :
+
+Un appel à POST /publish_binary_demo sur un nœud :
+
+génère un buffer binaire aléatoire (par exemple 200 kB) ;
+
+le découpe en chunks (BinaryChunk) de taille configurable (par ex. 65 536 octets) ;
+
+encapsule chaque chunk dans un Msg { kind: PublishBinaryChunk, payload = bincode(BinaryChunk) } ;
+
+diffuse ces messages sur tous les arbres comme pour PublishText ;
+
+loggue localement dans inbox des lignes de type :
+
+(local BIN t0 video_demo chunk 1/4 size=65536).
+
+À la réception d’un PublishBinaryChunk :
+
+le nœud désérialise le BinaryChunk ;
+
+met à jour un buffer local par file_id ;
+
+trace dans inbox :
+
+(BIN t2 from node3 file_id=video_demo chunk 3/4 size=65536) ;
+
+lorsque tous les chunks sont reçus, il reconstitue le buffer complet et trace :
+
+(BIN COMPLETE from node3 file_id=video_demo total_bytes=200000).
+
+4. API HTTP
+4.1. GET /stats
+Retourne un JSON avec :
+
+json
+Copy code
+{
+  "node_id": "node5",
+  "known_count": 143,
+  "last_msgs": [
+    "(BIN COMPLETE from node3 file_id=video_demo total_bytes=200000)",
+    "(BIN t1 from node3 file_id=video_demo chunk 4/4 size=3392)",
+    "(BIN t1 from node3 file_id=video_demo chunk 3/4 size=65536)",
+    "(BIN t1 from node3 file_id=video_demo chunk 2/4 size=65536)",
+    "(BIN t1 from node3 file_id=video_demo chunk 1/4 size=65536)",
+    "(t1 from node3) hello from node3"
+  ],
+  "trees": 3
 }
+known_count : nombre de messages distincts vus (texte + binaire + heartbeats).
 
-struct Message {
-    msg_id: Uuid,
-    sender_id: String,
-    tree_id: u8,
-    kind: MsgKind,
-    payload: Option<Vec<u8>>,
-    timestamp: u64,
+last_msgs : derniers messages (texte ou binaire) vus localement.
+
+trees : nombre d’arbres configurés (num_trees).
+
+4.2. POST /publish
+Payload JSON :
+
+json
+Copy code
+{
+  "payload": "hello from node3"
 }
-```
+Effet :
 
-La déduplication sur `(tree_id, msg_id)` empêche toute retransmission cyclique.
+Le message est injecté sur tous les arbres à partir du nœud local.
 
-## 6. API HTTP
+Les autres nœuds reçoivent et relaient ce PublishText.
 
-Une API REST minimale expose deux routes principales :
+4.3. POST /publish_binary_demo
+Payload JSON :
 
-### POST /publish
+json
+Copy code
+{
+  "file_id": "video_demo",
+  "total_size": 200000,
+  "chunk_size": 65536
+}
+Effet :
 
-Injecte un message dans le système. Pour chaque arbre, un message est généré et diffusé vers les enfants du nœud.
+Le nœud simule l’envoi d’un flux binaire file_id découpé en chunks.
 
-Exemple :
+Les nœuds reçoivent, tracent les chunks et reconstituent le fichier.
 
-```bash
-curl -X POST http://localhost:8083/publish \
-     -H "Content-Type: application/json" \
-     -d '{"payload":"Hello"}'
-```
+5. Démos possibles
+5.1. Démarrer le cluster Docker (10 nœuds)
+Depuis la racine du repo :
 
-### GET /stats
+bash
+Copy code
+./scripts/up.sh
+Vérifier que les conteneurs tournent :
 
-Affiche l’état interne du nœud :
+bash
+Copy code
+docker compose -f docker/docker-compose.yml ps
+Ports HTTP exposés (exemple) :
 
-- nombre de messages distincts reçus,
-- derniers messages reçus,
-- nombre d’arbres, etc.
+node1 → http://localhost:8081
 
-Exemple :
+node2 → http://localhost:8082
 
-```bash
-curl http://localhost:8081/stats
-```
+node3 → http://localhost:8083
 
-Note : les ports et hôtes dépendent de la configuration dans `configs/docker/cluster.yaml`. Ajustez les URL selon vos paramètres.
+…
 
-## 7. Structure du dépôt
+node10 → http://localhost:8090
 
-peerreview-rust/
-│
-├─ crates/
-│   ├─ common_proto/       # Format des messages TCP
-│   └─ lib/                # Extension du protocole (Ihave/Request/Batch)
-│
-├─ gossip_node/            # Binaire du nœud distribué
-│   └─ src/
-│        ├─ main.rs        # Point d'entrée et logique principale
-│        └─ ...
-│
-├─ configs/
-│   ├─ docker/             # Configurations des 10 nœuds Docker
-│   └─ local/              # Configurations pour tests locaux
-│
-├─ docker/
-│   └─ Dockerfile          # Construction de l’image
-│
-├─ scripts/
-│   ├─ gen_10nodes.sh      # Génération automatique des configs Docker
-│   └─ up.sh               # Construction et lancement du cluster
-│
-└─ README.md
+5.2. Démo texte
+Publier un message texte depuis node3 :
 
-## 8. Fonctionnalités actuelles
-
-- Diffusion distribuée via plusieurs arbres.
-- Communication interne TCP performante, binaire et compacte.
-- API HTTP simple pour tester, superviser et interagir avec un nœud.
-- Déduplication robuste contre les boucles.
-- Heartbeats périodiques pour chaque arbre.
-- Déploiement automatisé d’un cluster 10 nœuds via Docker.
-- Paramétrage complet via YAML.
-
-## 9. Démos possibles
-
-Ces démonstrations peuvent être effectuées en quelques commandes. Remplacez les ports par ceux définis dans `configs/docker/cluster.yaml` (ex. 8081, 8082, ...).
-
-### 9.1. Diffusion globale d'un message
-
-Publier depuis un nœud :
-
-```bash
+bash
+Copy code
 curl -X POST http://localhost:8083/publish \
   -H "Content-Type: application/json" \
-  -d '{"payload":"Hello world"}'
-```
+  -d '{"payload":"hello from node3"}'
+Observer sur d’autres nœuds :
 
-Observer sur d’autres nœuds (exemples) :
-
-```bash
+bash
+Copy code
 curl http://localhost:8081/stats
 curl http://localhost:8085/stats
-curl http://localhost:8089/stats
-```
+On voit apparaître :
 
-### 9.2. Publication depuis n'importe quel nœud
+json
+Copy code
+"(t2 from node3) hello from node3"
+ou similaire selon les arbres.
 
-```bash
-curl -X POST http://localhost:8087/publish \
+5.3. Démo binaire (chunks)
+Lancer la démo binaire depuis node3 :
+
+bash
+Copy code
+curl -X POST http://localhost:8083/publish_binary_demo \
   -H "Content-Type: application/json" \
-  -d '{"payload":"From node7"}'
-```
+  -d '{"file_id":"video_demo","total_size":200000,"chunk_size":65536}'
+Observer sur d’autres nœuds :
 
-Vérification (exemples) :
-
-```bash
-curl http://localhost:8082/stats
-curl http://localhost:80810/stats  # Remplacez par le port configuré pour le nœud 10
-```
-
-### 9.3. Envoi intensif de messages
-
-```bash
-for i in $(seq 1 20); do
-  curl -s -X POST http://localhost:8084/publish \
-    -H "Content-Type: application/json" \
-    -d "{\"payload\":\"msg_$i\"}" > /dev/null
-done
-```
-
-Vérification :
-
-```bash
+bash
+Copy code
 curl http://localhost:8081/stats
-```
+curl http://localhost:8085/stats
+Exemple de last_msgs sur node1 :
 
-Ces tests montrent : pas de duplication, propagation rapide et stabilité du système.
+json
+Copy code
+"(BIN COMPLETE from node3 file_id=video_demo total_bytes=200000)"
+"(BIN t2 from node3 file_id=video_demo chunk 4/4 size=3392)"
+"(BIN t2 from node3 file_id=video_demo chunk 3/4 size=65536)"
+"(BIN t2 from node3 file_id=video_demo chunk 2/4 size=65536)"
+"(BIN t2 from node3 file_id=video_demo chunk 1/4 size=65536)"
+"(t2 from node3) hello from node3"
+On voit :
 
-## 10. Lien avec PeerReview
+que le message texte est bien passé sur l’arbre t2 ;
 
-L’objectif final est de transformer ce système en une implémentation complète du protocole PeerReview. Le système actuel fournit déjà les briques essentielles :
+que les 4 chunks ont été reçus ;
 
-- overlay structuré multi-arbres,
-- communication fiable et déterministe,
-- propagation contrôlée,
-- mécanisme de déduplication,
-- transport léger,
-- protocole extensible (Ihave, Request, Batch déjà définis).
+que la reconstitution a eu lieu (ligne BIN COMPLETE).
 
-Prochaines étapes techniques recommandées :
+6. Lien avec PeerReview et sockets APP/PR
+Cette branche fournit la machinerie réseau dont PeerReview a besoin :
 
-- journaux sécurisés (tamper-evident logs),
-- hachage chaîné et signatures,
-- audits pair-à-pair,
-- vérification des écarts de comportement,
-- preuves cryptographiques de faute.
+diffusion fiable sur plusieurs arbres ;
 
-## 11. Conclusion
+messages sérialisés en bincode ;
 
-Ce projet constitue une base solide pour la mise en œuvre du protocole PeerReview. Il propose une infrastructure distribuée réaliste, configurable, performante et extensible. Le cluster multi-arbres, la communication TCP, l’API HTTP et les mécanismes internes en font une plateforme prête à accueillir les étapes suivantes : logs sécurisés, audits et vérification comportementale.
+HTTP pour piloter et introspecter ;
 
----
+base pour l’ajout de logs sécurisés et d’authenticators.
 
-Annexes rapides
+À terme, l’idée est de séparer le transport en deux sockets :
 
-- Lancement local (exemple) :
+socket APP :
 
-```bash
-# Générer la configuration des 10 nœuds (script fourni)
-./scripts/gen_10nodes.sh
+pour les messages applicatifs (PublishText, PublishBinaryChunk, Heartbeat, etc.) ;
 
-# Lancer le cluster via docker-compose (depuis le dossier `configs/docker`)
-./scripts/up.sh
-```
+socket PR :
 
-- Emplacement des messages partagés : `crates/common_proto`
-- Documentation technique et points d’extension : `crates/lib`
+pour les messages PeerReview (IHAVE, REQUEST, BATCH, etc.).
+
+Pour mettre en place cette séparation, il faudra :
+
+Côté config :
+
+dans les configs de nœud (nodeX.yaml), remplacer listen_addr par :
+
+app_listen_addr ;
+
+pr_listen_addr ;
+
+dans cluster.yaml, remplacer addr par :
+
+app_addr ;
+
+pr_addr.
+
+Côté code (main.rs) :
+
+adapter NodeCfg et Peer :
+
+rust
+Copy code
+struct NodeCfg {
+    id: String,
+    app_listen_addr: String,
+    pr_listen_addr: String,
+    ...
+}
+
+struct Peer {
+    id: String,
+    app_addr: String,
+    pr_addr: String,
+}
+garder la logique actuelle sur la socket APP (texte + binaire + heartbeats) ;
+
+ajouter un deuxième TcpListener + une boucle de réception pour la socket PR ;
+
+ajouter un deuxième mpsc::Sender<(Peer, Vec<u8>)> pour envoyer les messages PeerReview ;
+
+définir une enum PRMsg dans common_proto pour IHAVE, REQUEST, BATCH, etc., sérialisée en bincode.
+
+Côté PeerReview :
+
+brancher les appels peerreview.on_send(...) / peerreview.on_recv(...) autour de l’envoi/réception des Msg (APP) ;
+
+utiliser la socket PR pour transporter les messages de métadonnées (authenticators, logs, audits) entre witnesses.
+
+Pour l’instant, le choix a été de stabiliser l’implémentation mono-socket (APP) avec texte + binaire + multi-arbres, avant de séparer proprement APP / PR.

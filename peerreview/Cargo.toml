@@ -1,0 +1,13 @@
+[package]
+name = "peerreview"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "2"
+toml = "0.8"
+thiserror = "1"
+rand = "0.8"
+ed25519-dalek = "2" # pour les signatures (ou autre lib si déjà imposée)
+

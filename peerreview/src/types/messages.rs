@@ -1,45 +1,44 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PeerReviewMsg {
-    /// Message de base (écho, ping/pong, etc.) pour les tests réseau
+    /// Messages simples pour tester le réseau PR (ping/pong)
     Ping { from: u32, payload: String },
     Pong { from: u32, payload: String },
 
-    /// Messages PeerReview "réels" (à compléter par l’équipe PR)
+    /// Messages PeerReview "réels" (placeholders pour l'équipe PR)
     Send {
-        seq_num: usize,
-        prev_hash: [u8; 32],
-        signature: [u8; 64],
+        seq_num: u64,
+        prev_hash: Vec<u8>,   // TODO: pourra devenir [u8; 32]
+        signature: Vec<u8>,   // TODO: pourra devenir [u8; 64]
         dest: u32,
         payload: String,
     },
     AuditRequest {
-        min_seq: usize,
-        max_seq: usize,
+        min_seq: u64,
+        max_seq: u64,
     },
     AuditResponse {
-        // TODO: à compléter quand la struct LogEntry sera définie
-        // entries: Vec<LogEntry>,
-        prev_hash: [u8; 32],
+        // TODO: ajouter entries: Vec<LogEntry> plus tard
+        prev_hash: Vec<u8>,   // TODO: [u8; 32] plus tard
     },
     SendChallenge {
         message: String,
-        sender_sig: [u8; 64],
+        sender_sig: Vec<u8>,  // TODO: [u8; 64] plus tard
     },
     AuditChallenge {
-        min_auth: [u8; 64],
-        max_auth: [u8; 64],
+        min_auth: Vec<u8>,    // TODO: [u8; 64]
+        max_auth: Vec<u8>,    // TODO: [u8; 64]
     },
     ChallengeResponse {
-        // TODO: à définir par l’équipe PeerReview
+        // TODO: à définir
     },
     EvidenceRequest,
     EvidenceResponse {
-        // TODO: à définir (challenges, preuves, etc.)
+        // TODO: ajouter challenges + proofs plus tard
     },
     AuthenticatorBroadcast {
         node_id: u32,
-        authenticator: [u8; 64],
+        authenticator: Vec<u8>, // TODO: [u8; 64] plus tard
     },
 }

@@ -1,23 +1,20 @@
-use std::sync::Arc;
-use std::sync::Mutex;
-
-use ed25519_dalek::PublicKey;
+use std::io;
+use std::sync::{Arc, Mutex};
 
 use crate::network::tcp::NetworkLayer;
 use crate::types::config::PeersConfig;
-use crate::types::node::{Node, PeerInfo, PeerStatus};
+use crate::types::node::{Node, PeerInfo, PeerStatus, PublicKey};
 
 pub fn bootstrap_from_config(
     cfg_path: &str,
     net: &NetworkLayer,
     mut node: Node,
-) -> anyhow::Result<Node> {
+) -> io::Result<Node> {
     let cfg = PeersConfig::load(cfg_path)?;
 
     for peer in cfg.other_peers() {
-        // TODO: chargement réel de la clé publique depuis peer.public_key_file
-        let dummy_bytes = [0u8; 32];
-        let public_key = PublicKey::from_bytes(&dummy_bytes)?;
+        // Stub : clé publique vide (32 octets)
+        let public_key: PublicKey = [0u8; 32];
 
         println!("[PR] connecting to peer {} at {}", peer.id, peer.addr);
         let stream = net.connect(&peer.addr)?;

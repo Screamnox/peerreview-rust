@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 
-use ed25519_dalek::{Keypair, PublicKey};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-use crate::types::messages::PeerReviewMsg;
+/// Clé publique stub (32 octets). Pourra être remplacée par une vraie clé plus tard.
+pub type PublicKey = [u8; 32];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PeerStatus {
@@ -24,18 +24,17 @@ pub struct PeerInfo {
 
 pub struct Node {
     pub id: u32,
-    pub keypair: Keypair,
-    // logger sera ajouté plus tard par l'équipe PR
-    // pub logger: Logger,
+    /// Stub pour la clé privée/clé publique. L'équipe PR pourra remplacer ça par un vrai keypair.
+    pub keypair_bytes: Vec<u8>,
     pub peers: HashMap<u32, PeerInfo>,
     pub witnesses: Vec<u32>,
 }
 
 impl Node {
-    pub fn new(id: u32, keypair: Keypair) -> Self {
+    pub fn new(id: u32) -> Self {
         Self {
             id,
-            keypair,
+            keypair_bytes: Vec::new(),
             peers: HashMap::new(),
             witnesses: Vec::new(),
         }
@@ -51,23 +50,5 @@ impl Node {
 
     pub fn get_peer_mut(&mut self, id: u32) -> Option<&mut PeerInfo> {
         self.peers.get_mut(&id)
-    }
-
-    /// Exemple : envoyer un PeerReviewMsg à un peer donné
-    pub fn send_to_peer(
-        &self,
-        peer_id: u32,
-        msg: &PeerReviewMsg,
-        net: &crate::network::tcp::NetworkLayer,
-    ) -> std::io::Result<()> {
-        if let Some(peer) = self.peers.get(&peer_id) {
-            let mut guard = peer.socket.lock().unwrap();
-            net.send_message(&mut guard, msg)
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("peer {} not found", peer_id),
-            ))
-        }
     }
 }

@@ -6,127 +6,115 @@ use protocols::node::PeerReviewNode;
 
 fn main() -> std::io::Result<()> {
     println!("=== Démonstration du protocole PeerReview ===\n");
+    println!("Scénario : Communication honnête avec surveillance par témoins\n");
+
+    // Configuration des témoins (statique, tous les nœuds la connaissent)
+    let mut witnesses_map = std::collections::HashMap::new();
+    witnesses_map.insert(1, vec![3]); // Nœud 1 a pour témoin: 3
+
+    println!("=== Configuration ===");
+    println!("Nœud 1: témoin = {:?}", witnesses_map.get(&1).unwrap());
+    println!("Nœud 2: pas de témoin (simple destinataire)\n");
 
     // Création des loggers pour les nœuds
     let logger_node1 = Logger::new("node1_journal.log", 5000, 200)?;
     let logger_node2 = Logger::new("node2_journal.log", 5000, 200)?;
 
-    // Création des nœuds PeerReview
-    let mut node1 = PeerReviewNode::new(1, logger_node1);
-    let mut node2 = PeerReviewNode::new(2, logger_node2);
+    // Récupérer les clés publiques
+    let node1_public_key = *logger_node1.get_public_key();
+    let node2_public_key = *logger_node2.get_public_key();
 
-    // Enregistrer les clés publiques mutuelles
-    let node1_public_key = *node1.logger.get_public_key();
-    let node2_public_key = *node2.logger.get_public_key();
+    // Configuration des clés publiques (statique, tous les nœuds la connaissent)
+    let mut peer_keys_node1 = std::collections::HashMap::new();
+    peer_keys_node1.insert(2, node2_public_key);
 
-    node1.register_peer(2, node2_public_key);
-    node2.register_peer(1, node1_public_key);
+    let mut peer_keys_node2 = std::collections::HashMap::new();
+    peer_keys_node2.insert(1, node1_public_key);
+
+    // Création des nœuds PeerReview avec la configuration complète
+    let mut node1 = PeerReviewNode::new(1, logger_node1, witnesses_map.clone(), peer_keys_node1);
+    let mut node2 = PeerReviewNode::new(2, logger_node2, witnesses_map.clone(), peer_keys_node2);
 
     println!("✓ Nœud 1 et Nœud 2 initialisés\n");
 
-    // === Scénario 1: Communication réussie ===
-    println!("--- Scénario 1: Communication réussie ---");
+    // === Étape 1: Échange de messages ===
+    println!("--- Étape 1: Échange de messages entre nœuds ---\n");
 
-    // Algorithm 1: Nœud 1 envoie un message à Nœud 2
-    let message = "Bonjour depuis le nœud 1!";
-    let send_msg = node1.send_message(2, message)?;
-    println!("Message envoyé: {:?}", send_msg);
-    println!("✓ Message créé par le nœud 1\n");
+    // Nœud 1 envoie 11 messages à Nœud 2
+    for i in 1..=11 {
+        let msg = node1.send_message(2, &format!("Message {}", i))?;
+        
+        // Nœud 2 reçoit et vérifie le message
+        node2.receive_message(&msg, 1)?;
+        
+        println!("✓ Message {} : Nœud 1 → Nœud 2 (seq={})", i, msg.seq_num);
+    }
 
-    // Algorithm 2 & 3: Nœud 2 reçoit et vérifie le message, puis envoie un acquittement
-    let ack_msg = node2.receive_message(&send_msg, 1)?;
+    println!("\n✓ 11 messages échangés avec succès\n");
 
-    if let Some(ack) = ack_msg {
-        println!("✓ Nœud 2 a créé un acquittement\n");
+    // === Étape 2: Configuration du témoin ===
+    println!("--- Étape 2: Mise en place du témoin ---\n");
+    
+    let logger_node3 = Logger::new("node3_journal.log", 5000, 200)?;
+    let _node3_public_key = *logger_node3.get_public_key();
 
-        // Algorithm 4: Nœud 1 vérifie l'acquittement
-        let node2_pub_key = *node1.peer_public_keys.get(&2).unwrap();
-        let is_valid =
-            node1.verify_recv_message(&ack, 2, &node2_pub_key, send_msg.seq_num, message);
+    let mut peer_keys_node3 = std::collections::HashMap::new();
+    peer_keys_node3.insert(1, node1_public_key); // Témoin 3 surveille nœud 1
+
+    let mut node3 = PeerReviewNode::new(3, logger_node3, witnesses_map.clone(), peer_keys_node3);
+
+    println!("✓ Témoin 3 initialisé pour surveiller le nœud 1\n");
+
+    // === Étape 3: Surveillance et accumulation d'authenticators ===
+    println!("--- Étape 3: Accumulation d'authenticators par le témoin ---\n");
+
+    // Simuler que le témoin 3 reçoit les authenticators des 11 messages précédents
+    // (normalement envoyés automatiquement par receive_message)
+    let all_logs = node1.logger.get_log(11)?;
+    for log_entry in &all_logs {
+        node3.store_authenticator(1, log_entry.s_k, log_entry.sig);
+        println!("Témoin 3 a stocké l'authenticator seq={}", log_entry.s_k);
+    }
+
+    println!("\n✓ 11 authenticators stockés par le témoin 3\n");
+
+    // === Étape 4: Challenge automatique ===
+    println!("--- Étape 4: Challenge automatique du témoin ---\n");
+    println!("Le témoin 3 a atteint le seuil de {} authenticators", node3.challenge_threshold);
+
+    if let Some(challenge) = node3.challenge_witnessed_node(1)? {
+        println!("✓ Challenge créé: témoin {} → nœud {}", challenge.witness_id, challenge.target_id);
+        println!("  Séquences demandées: {:?}\n", &challenge.seq_nums);
+
+        // === Étape 5: Réponse honnête du nœud ===
+        println!("--- Étape 5: Réponse du nœud surveillé ---\n");
+        let logs_response = node1.respond_to_challenge(&challenge)?;
+        println!("✓ Nœud 1 a répondu avec {} logs\n", logs_response.len());
+
+        // === Étape 6: Vérification par le témoin ===
+        println!("--- Étape 6: Vérification des logs par le témoin ---\n");
+        let is_valid = node3.verify_logs_as_witness(1, &logs_response);
 
         if is_valid {
-            println!("✓ Communication réussie entre nœud 1 et nœud 2!\n");
+            println!("✓ RÉSULTAT: Tous les logs sont valides, le nœud 1 est HONNÊTE!");
+            println!("✓ Les authenticators ont été automatiquement supprimés");
+            println!("✓ Le protocole de consistency a fonctionné correctement\n");
         } else {
-            println!("✗ Échec de la vérification de l'acquittement\n");
+            println!("✗ RÉSULTAT: Incohérence détectée\n");
+        }
+
+        // Afficher les nœuds exposés
+        let exposed = node3.get_exposed_nodes();
+        if exposed.is_empty() {
+            println!("✓ Aucun nœud exposé : tous les nœuds sont honnêtes\n");
+        } else {
+            println!("⚠️  Nœuds exposés par le témoin 3: {:?}\n", exposed);
         }
     } else {
-        println!("✗ Pas d'acquittement reçu (message invalide)\n");
+        println!("✗ Seuil non atteint, pas de challenge");
     }
 
-    /*  // === Scénario 2: Message avec signature invalide ===
-    println!("\n--- Scénario 2: Tentative avec signature invalide ---");
-
-    let mut invalid_msg = send_msg.clone();
-    invalid_msg.signature = [0xFF; 64]; // Signature corrompue
-
-    let ack_invalid = node2.receive_message(&invalid_msg, 1)?;
-
-    if ack_invalid.is_none() {
-        println!("✓ Nœud 2 a correctement détecté le message invalide et créé un challenge\n");
-    }
-
-    // === Scénario 3: Envoi avec timeout (simulation) ===
-    println!("--- Scénario 3: Simulation de timeout ---");
-
-    // Simulation: pas d'acquittement reçu
-    let result = node1.send_with_acknowledgment(
-        2,
-        "Test timeout",
-        Duration::from_millis(100),
-        None, // Pas d'acquittement
-    )?;
-
-    if !result {
-        println!("✓ Challenge créé suite au timeout\n");
-    }
-
-    // === Scénario 4: Test du protocole de Consistency ===
-    println!("--- Scénario 4: Protocole de Consistency ---");
-
-    // Nœud 1 envoie un challenge de consistency au nœud 2
-    let consistency_challenge = node1.send_consistency_challenge(2, 1, 5)?;
-    println!("✓ Challenge de consistency envoyé\n");
-
-    // Nœud 2 répond avec ses logs
-    let logs_from_node2 = node2.respond_to_consistency_challenge(&consistency_challenge, 1, 5)?;
-    println!("✓ Nœud 2 a répondu avec {} entrées\n", logs_from_node2.len());
-
-    // Nœud 1 vérifie la consistency des logs reçus
-    let is_consistent = node1.verify_consistency(2, &logs_from_node2);
-    if is_consistent {
-        println!("✓ Les logs du nœud 2 sont cohérents\n");
-    } else {
-        println!("✗ Incohérence détectée dans les logs du nœud 2\n");
-    } */
-
-    println!("=== Démonstration terminée ===");
-
-    // Test de get_log() de la branche journal
-    let mut test_logger = Logger::new("journal.log", 10, 200)?;
-    let result = test_logger.get_log(10)?;
-
-    println!("\nTest get_log - Taille : {}", result.len());
-
-    if !result.is_empty() {
-        println!("Première log du get_log : {:?}", result[0]);
-    }
-
-    let _sig_recv: [u8; 64] = [
-        0xAA, 0x19, 0xE3, 0x4F, 0x0C, 0xB2, 0x7D, 0x33, 0x91, 0x60, 0x18, 0x72, 0xBE, 0x05, 0xD9,
-        0x27, 0x48, 0x9A, 0xF1, 0xC3, 0x14, 0x26, 0xE0, 0x8F, 0x55, 0x31, 0xB4, 0x7A, 0x02, 0x63,
-        0xD5, 0xC0, 0xAA, 0x19, 0xE3, 0x4F, 0x0C, 0xB2, 0x7D, 0x33, 0x91, 0x60, 0x18, 0x72, 0xBE,
-        0x05, 0xD9, 0x27, 0x48, 0x9A, 0xF1, 0xC3, 0x14, 0x26, 0xE0, 0x8F, 0x02, 0x63, 0xD5, 0xC0,
-        0x55, 0x31, 0xB4, 0x7A,
-    ];
-
-    /* test_logger.log_send(42, "Salut je suis une base64")?;
-    test_logger.log_recv(69, 40, sig_recv, "Salut je suis une base64")?;
-    let _sig = logger.log_send(42, "Salut je suis une base64")?;
-    logger.log_recv(69, 40, sig_recv, "Salut je suis une base64")?; */
-
-    for log in test_logger.get_log(10)? {
-        println!("{}", log);
-    }
+    println!("\n=== Démonstration terminée ===");
 
     Ok(())
 }

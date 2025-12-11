@@ -46,10 +46,10 @@ impl PeerReviewNode {
             payload: message.to_string(),
         };
 
-        println!(
+        /* println!(
             "[Nœud {}] Message SEND créé pour le nœud {} (seq={}, prev_hash={:02x}{:02x}...)",
             self.node_id, receiver_id, current_seq, prev_hash_for_msg[0], prev_hash_for_msg[1]
-        );
+        ); */
 
         Ok(send_msg)
     }
@@ -79,10 +79,10 @@ impl PeerReviewNode {
         let seq_num = msg.seq_num; // sk
         let signature = msg.signature; // αk
         let message = &msg.payload; // m
-        println!(
+        /* println!(
             "[Nœud {}] Vérification du message SEND (seq={}, prev_hash={:02x}{:02x}...)",
             self.node_id, seq_num, prev_hash[0], prev_hash[1]
-        );
+        ); */
 
         // Étape 3: Calculer ĥk = H(hk-1 || sk || SEND || H(ck))
         // où ck = {j, m}
@@ -92,10 +92,10 @@ impl PeerReviewNode {
         hasher.update(msg.dest.to_be_bytes()); // j (destinataire du message)
         hasher.update(message.as_bytes()); // m
         let c_k = hasher.finalize();
-        println!(
+        /* println!(
             "[Nœud {}] Calcul de H(ck) pour ck = {{ {}, {} }}",
             self.node_id, msg.dest, message
-        );
+        ); */
 
         // Ensuite calculer ĥk = H(hk-1 || sk || SEND || H(ck))
         hasher = Sha256::new();
@@ -104,23 +104,23 @@ impl PeerReviewNode {
         hasher.update((LogType::Send as u8).to_be_bytes()); // SEND
         hasher.update(c_k); // H(ck)
         let h_k_computed: [u8; 32] = hasher.finalize().into();
-        println!(
+        /* println!(
             "[Nœud {}] Calcul de ĥk = H(hk-1 || sk || SEND || H(ck)). ĥk = {}",
             self.node_id,
             hex::encode(h_k_computed)
-        );
+        ); */
 
         // Étape 4: Vérifier la signature pour obtenir hk = σ̄i(αk, p(i))
         // La signature est sur (sk || hk)
         let mut signed_data = [0u8; 40];
         signed_data[..8].copy_from_slice(&seq_num.to_be_bytes());
         signed_data[8..].copy_from_slice(&h_k_computed);
-        println!(
+        /* println!(
             "[Nœud {}] Vérification de la signature pour (sk={}, ĥk={})",
             self.node_id,
             seq_num,
             hex::encode(h_k_computed)
-        );
+        ); */
 
         let signature_obj = match ed25519_dalek::Signature::from_bytes(&signature) {
             Ok(sig) => sig,
@@ -197,6 +197,10 @@ impl PeerReviewNode {
         }
 
         // Étape 3: Message valide
+        // IMPORTANT: Envoyer l'authenticator (signature) du sender aux témoins du sender
+        // C'est ça le protocole de consistency !
+        self.send_authenticator_to_witnesses(sender_id, msg.seq_num, msg.signature)?;
+
         // Étape 4: Créer une entrée de log RECV (cl = {i, sk, m})
         self.logger
             .log_recv(sender_id, msg.seq_num, msg.signature, &msg.payload)?;

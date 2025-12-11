@@ -12,8 +12,8 @@ pub enum LogType {
     Recv = 1,
 }
 
-/// Structure d’une entrée du journal
-#[derive(Debug)]
+/// Structure d'une entrée du journal
+#[derive(Debug, Clone)]
 pub struct LogEntry {
     pub s_k: usize,        // numéro séquentiel (anciennement timestamp)
     pub log_type: LogType, // type d’opération

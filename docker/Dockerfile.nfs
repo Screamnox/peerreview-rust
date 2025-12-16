@@ -6,14 +6,18 @@ WORKDIR /build
 # Copier les fichiers de configuration Cargo
 COPY Cargo.toml Cargo.lock* ./
 COPY apps/nfs_node/Cargo.toml apps/nfs_node/
+COPY apps/nfs_client/Cargo.toml apps/nfs_client/
 COPY apps/gossip_node/Cargo.toml apps/gossip_node/
 COPY crates/common_proto/Cargo.toml crates/common_proto/
+COPY crates/deterministic_fs/Cargo.toml crates/deterministic_fs/
 
 # Créer des fichiers sources factices pour la mise en cache des dépendances
-RUN mkdir -p apps/nfs_node/src apps/gossip_node/src crates/common_proto/src && \
+RUN mkdir -p apps/nfs_node/src apps/nfs_client/src apps/gossip_node/src crates/common_proto/src crates/deterministic_fs/src && \
     echo "fn main() {}" > apps/nfs_node/src/main.rs && \
+    echo "fn main() {}" > apps/nfs_client/src/main.rs && \
     echo "fn main() {}" > apps/gossip_node/src/main.rs && \
-    echo "" > crates/common_proto/src/lib.rs
+    echo "" > crates/common_proto/src/lib.rs && \
+    echo "" > crates/deterministic_fs/src/lib.rs
 
 # Compiler les dépendances
 RUN cargo build --release --package nfs_node || true
@@ -21,9 +25,10 @@ RUN cargo build --release --package nfs_node || true
 # Copier le code source réel
 COPY apps/nfs_node/src apps/nfs_node/src
 COPY crates/common_proto/src crates/common_proto/src
+COPY crates/deterministic_fs/src crates/deterministic_fs/src
 
 # Recompiler avec le code source réel
-RUN touch apps/nfs_node/src/main.rs crates/common_proto/src/lib.rs && \
+RUN touch apps/nfs_node/src/main.rs crates/common_proto/src/lib.rs crates/deterministic_fs/src/lib.rs && \
     cargo build --release --package nfs_node
 
 # Stage 2: Runtime

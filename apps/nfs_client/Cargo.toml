@@ -1,7 +1,11 @@
 [package]
-name = "nfs_node"
+name = "nfs_client"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "nfs_client"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
@@ -12,10 +16,5 @@ serde_yaml = "0.9"
 serde_json = "1"
 bincode = "1"
 uuid = { version = "1", features = ["v4"] }
-time = "0.3"
-axum = { version = "0.7", features = ["json"] }
-tower = "0.5"
-dashmap = "5"
-parking_lot = "0.12"
 common_proto = { path = "../../crates/common_proto" }
 deterministic_fs = { path = "../../crates/deterministic_fs" }

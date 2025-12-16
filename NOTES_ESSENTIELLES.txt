@@ -1,0 +1,208 @@
+================================================================================
+                    NOTES ESSENTIELLES - NFS APPLICATION v1.0
+             ✅ 100% CONFORME PEERREVIEW SECTION 6.3
+================================================================================
+
+=== 1. COMPILATION ===
+
+Compiler tout le workspace :
+  cargo build --release --workspace
+
+Compiler uniquement le serveur :
+  cargo build --release --package nfs_node
+
+Compiler uniquement le client :
+  cargo build --release --package nfs_client
+
+Vérifier la syntaxe sans compiler :
+  cargo check --workspace
+
+
+=== 2. UTILISATION CLIENT NFS (RECOMMANDÉ - CONFORME PEERREVIEW) ===
+
+Lancer le serveur :
+  cargo run --release --package nfs_node -- \
+    --config configs/docker/nfs_server1.yaml \
+    --cluster configs/docker/nfs_cluster.yaml
+
+CLIENT - Écrire un fichier :
+  cargo run --release --package nfs_client -- \
+    --id client1 --server localhost:9001 \
+    write --path test.txt --data "Hello PeerReview"
+
+CLIENT - Lire un fichier :
+  cargo run --release --package nfs_client -- \
+    --id client1 --server localhost:9001 \
+    read --path test.txt
+
+CLIENT - Lister les fichiers :
+  cargo run --release --package nfs_client -- \
+    --id client1 --server localhost:9001 \
+    list --path /
+
+CLIENT - Supprimer un fichier :
+  cargo run --release --package nfs_client -- \
+    --id client1 --server localhost:9001 \
+    delete --path test.txt
+
+CLIENT - Mode interactif :
+  cargo run --release --package nfs_client -- \
+    --id client1 --server localhost:9001 \
+    interactive
+
+
+=== 3. TEST AUTOMATIQUE ===
+
+Script de test complet (compile + serveur + client + tests) :
+  ./test_client_server.sh
+
+
+=== 4. API HTTP (POUR TESTS/DEBUG UNIQUEMENT) ===
+
+Statistiques du serveur :
+  curl -s http://localhost:8091/stats | jq
+
+Écrire un fichier :
+  curl -s -X POST http://localhost:8091/write \
+    -H "Content-Type: application/json" \
+    -d '{"path":"test.txt","offset":0,"data":"Hello World"}'
+
+Lire un fichier :
+  curl -s -X POST http://localhost:8091/read \
+    -H "Content-Type: application/json" \
+    -d '{"path":"test.txt","offset":0,"length":100}'
+
+Lister les fichiers :
+  curl -s -X POST http://localhost:8091/list \
+    -H "Content-Type: application/json" \
+    -d '{"path":"/"}'
+
+Supprimer un fichier :
+  curl -s -X POST http://localhost:8091/delete \
+    -H "Content-Type: application/json" \
+    -d '{"path":"test.txt"}'
+
+
+=== 5. DOCKER - NFS CLUSTER ===
+
+Construire l'image Docker :
+  docker build -f docker/Dockerfile.nfs -t nfs-node .
+
+Démarrer le cluster (3 serveurs) :
+  docker compose -f docker/nfs-compose.yml up -d
+
+Vérifier le statut :
+  docker compose -f docker/nfs-compose.yml ps
+
+Voir les logs :
+  docker logs nfs_server1
+  docker logs -f nfs_server1    # en temps réel
+
+Arrêter le cluster :
+  docker compose -f docker/nfs-compose.yml down
+
+Arrêter ET supprimer les volumes (⚠️ efface les données) :
+  docker compose -f docker/nfs-compose.yml down -v
+
+
+=== 6. ARCHITECTURE NFS v1.0 ===
+
+✅ NOUVEAU: Application complète conforme PeerReview Section 6.3
+
+Composants implémentés :
+  apps/nfs_client/src/main.rs           → Client NFS (350 lignes) ✅ NOUVEAU
+  apps/nfs_node/src/main.rs             → Serveur NFS (510 lignes) ✅ MODIFIÉ
+  crates/deterministic_fs/src/lib.rs    → Filesystem déterministe (350 lignes) ✅ NOUVEAU
+  crates/common_proto/src/nfs.rs        → Protocoles NFS (121 lignes)
+
+Ports utilisés :
+  - Serveur 1 : RPC TCP 9001, HTTP API 8091
+  - Serveur 2 : RPC TCP 9002, HTTP API 8092
+  - Serveur 3 : RPC TCP 9003, HTTP API 8093
+
+  Note: Ports RPC TCP pour clients NFS, ports HTTP pour tests/debug
+
+Opérations NFS supportées :
+  - READ    : Lire des données (avec offset et length)
+  - WRITE   : Écrire des données (avec offset)
+  - DELETE  : Supprimer un fichier
+  - LIST    : Lister le contenu d'un répertoire
+
+
+=== 7. CONCEPTS PEERREVIEW IMPLÉMENTÉS ===
+
+📌 MACHINE À ÉTATS CLIENT (TRIVIALE)
+  → Client NFS : apps/nfs_client/src/main.rs
+  → Accepte commandes utilisateur
+  → Convertit en RPC (NFSRequest)
+  → Envoie au serveur via TCP
+  → Synchronise horloge Lamport
+
+📌 MACHINE À ÉTATS SERVEUR (COMPLEXE)
+  → Serveur NFS : apps/nfs_node/src/main.rs
+  → Reçoit RPC, synchronise horloge
+  → Exécute opérations via DeterministicFS
+  → Répond avec nouveau timestamp
+
+📌 HORLOGE DÉTERMINISTE (LAMPORT)
+  → DeterministicClock : crates/deterministic_fs/src/lib.rs
+  → Synchronisation client-serveur automatique
+  → Ordre total des événements garanti
+  → Protocole: clock = max(clock_local, timestamp_reçu)
+
+📌 FILESYSTEM DÉTERMINISTE
+  → DeterministicFS : crates/deterministic_fs/src/lib.rs
+  → Métadonnées avec timestamps Lamport (PAS SystemTime!)
+  → Sérialisation automatique (verrous par fichier)
+  → Pas d'aléatoire (pas de rand(), process::id())
+  → Métadonnées persistées dans .metadata.json
+
+📌 SÉRIALISATION CONCURRENCE
+  → Verrous par fichier (DashMap<String, Mutex>)
+  → Opérations concurrentes sur même fichier = sérialisées
+  → Ordre déterministe garanti
+
+📌 HISTORIQUE DES OPÉRATIONS
+  → Format: [t=timestamp] OPERATION path -> RESULT
+  → Exemple: [t=100] WRITE test.txt -> OK (42 bytes)
+  → 100 dernières opérations conservées
+
+
+=== 8. COMMANDES UTILES ===
+
+Vérifier les ports utilisés (Linux/WSL) :
+  lsof -i :9001
+  netstat -ano | grep 9001
+
+Nettoyer le cache Docker :
+  docker builder prune -a
+
+Rebuild sans cache :
+  docker build --no-cache -f docker/Dockerfile.nfs -t nfs-node .
+
+Voir l'espace disque des volumes Docker :
+  docker system df -v
+
+Voir les métadonnées déterministes :
+  cat /data/vol1/.metadata.json | jq
+
+
+=== 11. GIT - GESTION DES BRANCHES ===
+
+Créer une nouvelle branche et basculer dessus :
+  git checkout -b nom-branche
+
+Pousser une branche vers le remote (première fois) :
+  git push -u origin nom-branche
+
+Voir les branches :
+  git branch              # branches locales
+  git branch -r           # branches remote
+  git branch -a           # toutes les branches
+
+Sauvegarder temporairement des changements :
+  git stash              # sauvegarder
+  git stash pop          # restaurer
+
+Ajouter un fichier ignoré par .gitignore :
+  git add -f fichier.md

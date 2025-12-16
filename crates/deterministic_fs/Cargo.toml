@@ -1,0 +1,12 @@
+[package]
+name = "deterministic_fs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dashmap = "5"
+parking_lot = "0.12"
+sha3 = "0.10"

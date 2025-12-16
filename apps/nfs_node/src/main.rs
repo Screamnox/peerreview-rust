@@ -1,6 +1,12 @@
 //! Application NFS simplifiée pour PeerReview
 //!
 //! Serveur de fichiers réseau avec opérations READ, WRITE, DELETE, LIST.
+//! Conforme à la Section 6.3 du papier PeerReview.
+//!
+//! Utilise DeterministicFS pour garantir un comportement déterministe complet:
+//! - Horloge de Lamport pour tous les timestamps
+//! - Sérialisation des opérations concurrentes
+//! - Métadonnées déterministes (pas de timestamps système)
 
 use anyhow::Result;
 use axum::{
@@ -13,12 +19,11 @@ use common_proto::{
     NFSClusterConfig, NFSOperation, NFSReply, NFSRequest, NFSResponse, NFSServerConfig,
     NFSServerStats, NodeId,
 };
-use dashmap::DashMap;
+use deterministic_fs::{DeterministicClock, DeterministicFS};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{Read as IoRead, Seek, SeekFrom, Write as IoWrite};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,88 +44,38 @@ struct Args {
     cluster: String,
 }
 
-// ----------------- Horloge Déterministe -----------------
-#[derive(Debug)]
-pub struct DeterministicClock {
-    current_time: AtomicU64,
-}
-
-impl DeterministicClock {
-    pub fn new() -> Self {
-        Self {
-            current_time: AtomicU64::new(0),
-        }
-    }
-
-    pub fn now(&self) -> u64 {
-        self.current_time.load(Ordering::SeqCst)
-    }
-
-    pub fn set_time(&self, time: u64) {
-        self.current_time.store(time, Ordering::SeqCst);
-    }
-
-    /// Met à jour le temps si le nouveau temps est plus grand
-    pub fn update_time(&self, time: u64) {
-        self.current_time.fetch_max(time, Ordering::SeqCst);
-    }
-}
-
-impl Default for DeterministicClock {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ----------------- État du Serveur NFS -----------------
 #[derive(Clone)]
 struct ServerState {
     /// Identifiant du serveur
     my_id: NodeId,
-    /// Racine du volume exporté
-    volume_root: PathBuf,
-    /// Horloge déterministe
+    /// Filesystem déterministe
+    fs: Arc<DeterministicFS>,
+    /// Horloge déterministe (partagée avec le filesystem)
     clock: Arc<DeterministicClock>,
     /// Compteur d'opérations
     operations_count: Arc<AtomicU64>,
     /// Historique des opérations (pour affichage)
     operation_history: Arc<Mutex<VecDeque<String>>>,
-    /// Verrous par fichier pour sérialisation des opérations
-    file_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl ServerState {
     fn new(config: &NFSServerConfig) -> Result<Self> {
         let volume_root = PathBuf::from(&config.volume_path);
 
-        // Créer le répertoire du volume s'il n'existe pas
-        fs::create_dir_all(&volume_root)?;
+        // Créer l'horloge déterministe
+        let clock = Arc::new(DeterministicClock::new());
+
+        // Créer le filesystem déterministe
+        let det_fs = DeterministicFS::new(volume_root, (*clock).clone())?;
 
         Ok(Self {
             my_id: config.id.clone(),
-            volume_root,
-            clock: Arc::new(DeterministicClock::new()),
+            fs: Arc::new(det_fs),
+            clock,
             operations_count: Arc::new(AtomicU64::new(0)),
             operation_history: Arc::new(Mutex::new(VecDeque::with_capacity(100))),
-            file_locks: Arc::new(DashMap::new()),
         })
-    }
-
-    /// Obtenir le verrou pour un fichier (sérialisation des opérations)
-    fn get_file_lock(&self, path: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.file_locks
-            .entry(path.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    }
-
-    /// Résoudre un chemin relatif vers le chemin absolu dans le volume
-    fn resolve_path(&self, relative_path: &str) -> PathBuf {
-        // Nettoyer le chemin pour éviter les traversées de répertoire
-        let clean_path = relative_path
-            .trim_start_matches('/')
-            .replace("..", "");
-        self.volume_root.join(clean_path)
     }
 
     /// Exécuter une opération NFS
@@ -146,87 +101,27 @@ impl ServerState {
 
     /// Opération READ
     async fn do_read(&self, file_path: &str, offset: u64, length: u64) -> NFSResponse {
-        let path = self.resolve_path(file_path);
-        let lock = self.get_file_lock(file_path);
-        let _guard = lock.lock().await;
-
-        match fs::File::open(&path) {
-            Ok(mut file) => {
-                if let Err(e) = file.seek(SeekFrom::Start(offset)) {
-                    return NFSResponse::Error {
-                        message: format!("Seek error: {}", e),
-                    };
-                }
-
-                let mut buffer = vec![0u8; length as usize];
-                match file.read(&mut buffer) {
-                    Ok(bytes_read) => {
-                        buffer.truncate(bytes_read);
-                        NFSResponse::ReadOk { data: buffer }
-                    }
-                    Err(e) => NFSResponse::Error {
-                        message: format!("Read error: {}", e),
-                    },
-                }
-            }
+        match self.fs.read(file_path, offset, length) {
+            Ok(data) => NFSResponse::ReadOk { data },
             Err(e) => NFSResponse::Error {
-                message: format!("Open error: {}", e),
+                message: format!("Read error: {}", e),
             },
         }
     }
 
     /// Opération WRITE
     async fn do_write(&self, file_path: &str, offset: u64, data: &[u8]) -> NFSResponse {
-        let path = self.resolve_path(file_path);
-        let lock = self.get_file_lock(file_path);
-        let _guard = lock.lock().await;
-
-        // Créer les répertoires parents si nécessaire
-        if let Some(parent) = path.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                return NFSResponse::Error {
-                    message: format!("Create dir error: {}", e),
-                };
-            }
-        }
-
-        // Ouvrir ou créer le fichier
-        let file_result = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path);
-
-        match file_result {
-            Ok(mut file) => {
-                if let Err(e) = file.seek(SeekFrom::Start(offset)) {
-                    return NFSResponse::Error {
-                        message: format!("Seek error: {}", e),
-                    };
-                }
-
-                match file.write(data) {
-                    Ok(bytes_written) => NFSResponse::WriteOk {
-                        bytes_written: bytes_written as u64,
-                    },
-                    Err(e) => NFSResponse::Error {
-                        message: format!("Write error: {}", e),
-                    },
-                }
-            }
+        match self.fs.write(file_path, offset, data) {
+            Ok(bytes_written) => NFSResponse::WriteOk { bytes_written },
             Err(e) => NFSResponse::Error {
-                message: format!("Open error: {}", e),
+                message: format!("Write error: {}", e),
             },
         }
     }
 
     /// Opération DELETE
     async fn do_delete(&self, file_path: &str) -> NFSResponse {
-        let path = self.resolve_path(file_path);
-        let lock = self.get_file_lock(file_path);
-        let _guard = lock.lock().await;
-
-        match fs::remove_file(&path) {
+        match self.fs.delete(file_path) {
             Ok(()) => NFSResponse::DeleteOk,
             Err(e) => NFSResponse::Error {
                 message: format!("Delete error: {}", e),
@@ -236,21 +131,8 @@ impl ServerState {
 
     /// Opération LIST
     async fn do_list(&self, dir_path: &str) -> NFSResponse {
-        let path = self.resolve_path(dir_path);
-        let lock = self.get_file_lock(dir_path);
-        let _guard = lock.lock().await;
-
-        match fs::read_dir(&path) {
-            Ok(entries) => {
-                let mut names: Vec<String> = Vec::new();
-                for entry in entries.flatten() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        names.push(name.to_string());
-                    }
-                }
-                names.sort();
-                NFSResponse::ListOk { entries: names }
-            }
+        match self.fs.list(dir_path) {
+            Ok(entries) => NFSResponse::ListOk { entries },
             Err(e) => NFSResponse::Error {
                 message: format!("List error: {}", e),
             },
@@ -274,7 +156,12 @@ impl ServerState {
             NFSResponse::Error { message } => format!("ERROR: {}", message),
         };
 
-        let log_entry = format!("{} -> {}", op_str, result_str);
+        let log_entry = format!(
+            "[t={}] {} -> {}",
+            self.clock.now(),
+            op_str,
+            result_str
+        );
 
         let mut history = self.operation_history.lock();
         if history.len() >= 100 {
@@ -290,13 +177,12 @@ impl ServerState {
         let mut volume_size = 0u64;
         let mut file_count = 0usize;
 
-        if let Ok(entries) = fs::read_dir(&self.volume_root) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        volume_size += metadata.len();
-                        file_count += 1;
-                    }
+        // Compter tous les fichiers et leur taille
+        if let Ok(entries) = self.fs.list("/") {
+            for entry in entries {
+                if let Some(meta) = self.fs.get_metadata(&entry) {
+                    volume_size += meta.size;
+                    file_count += 1;
                 }
             }
         }
@@ -331,7 +217,7 @@ struct HttpReadRequest {
 struct HttpWriteRequest {
     path: String,
     offset: Option<u64>,
-    data: String, // Base64 ou texte brut
+    data: String,
 }
 
 /// Requête HTTP pour DELETE
@@ -497,6 +383,8 @@ async fn handle_tcp_connection(mut stream: TcpStream, state: ServerState) {
         .map(|a| a.to_string())
         .unwrap_or_else(|_| "unknown".to_string());
 
+    println!("{} TCP connection from {}", state.my_id, peer_addr);
+
     loop {
         // Lire la longueur du message (4 bytes big-endian)
         let mut len_buf = [0u8; 4];
@@ -520,7 +408,12 @@ async fn handle_tcp_connection(mut stream: TcpStream, state: ServerState) {
             }
         };
 
-        // Mettre à jour l'horloge avec le timestamp de la requête
+        println!(
+            "{} RPC from {}: {:?} (timestamp={})",
+            state.my_id, request.from, request.operation, request.timestamp
+        );
+
+        // Mettre à jour l'horloge avec le timestamp de la requête (Lamport clock sync)
         state.clock.update_time(request.timestamp);
 
         // Exécuter l'opération
@@ -545,7 +438,11 @@ async fn handle_tcp_connection(mut stream: TcpStream, state: ServerState) {
         if stream.write_all(&reply_bytes).await.is_err() {
             break;
         }
+
+        println!("{} Reply sent (timestamp={})", state.my_id, reply.timestamp);
     }
+
+    println!("{} TCP connection closed: {}", state.my_id, peer_addr);
 }
 
 // ----------------- Main -----------------
@@ -560,8 +457,15 @@ async fn main() -> Result<()> {
     let _cluster_cfg: NFSClusterConfig =
         serde_yaml::from_str(&fs::read_to_string(&args.cluster)?)?;
 
-    println!("Starting NFS server: {}", node_cfg.id);
+    println!("==========================================");
+    println!("  NFS Server - Conforme PeerReview 6.3");
+    println!("==========================================");
+    println!("Server ID: {}", node_cfg.id);
     println!("Volume path: {}", node_cfg.volume_path);
+    println!("Deterministic filesystem: ENABLED");
+    println!("Lamport clock: ENABLED");
+    println!("==========================================");
+    println!();
 
     // Créer l'état du serveur
     let state = ServerState::new(&node_cfg)?;
@@ -569,14 +473,13 @@ async fn main() -> Result<()> {
     // Démarrer le serveur TCP
     let listen_addr: SocketAddr = node_cfg.listen_addr.parse()?;
     let tcp_listener = TcpListener::bind(listen_addr).await?;
-    println!("{} listening on TCP {}", node_cfg.id, listen_addr);
+    println!("{} TCP RPC listening on {}", node_cfg.id, listen_addr);
 
     let tcp_state = state.clone();
     tokio::spawn(async move {
         loop {
             match tcp_listener.accept().await {
-                Ok((stream, addr)) => {
-                    println!("{} accepted TCP connection from {}", tcp_state.my_id, addr);
+                Ok((stream, _addr)) => {
                     let conn_state = tcp_state.clone();
                     tokio::spawn(handle_tcp_connection(stream, conn_state));
                 }
@@ -597,7 +500,8 @@ async fn main() -> Result<()> {
         .route("/stats", get(http_stats))
         .with_state(state);
 
-    println!("{} HTTP API on {}", node_cfg.id, http_addr);
+    println!("{} HTTP API listening on {}", node_cfg.id, http_addr);
+    println!();
 
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
     axum::serve(listener, app).await?;

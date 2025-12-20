@@ -30,6 +30,21 @@ pub struct StoredAuthenticator {
     pub signature: [u8; 64], // Signature Ed25519
 }
 
+/// État de détection d'un nœud (Algorithm 15)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DetectionState {
+    Trusted,        // État par défaut: nœud correct/de confiance
+    Suspected,      // Nœud suspect (challenge en attente)
+    Exposed,        // Nœud définitivement fautif
+}
+
+/// Challenge en attente pour un nœud suspect
+#[derive(Debug, Clone)]
+pub struct PendingChallenge {
+    pub target_node_id: u32,
+    pub seq_nums: Vec<usize>,
+}
+
 /// Structure d'un nœud PeerReview
 pub struct PeerReviewNode {
     pub node_id: u32,
@@ -45,6 +60,10 @@ pub struct PeerReviewNode {
     pub challenge_threshold: usize,
     /// Nœuds marqués comme EXPOSED (fautifs)
     pub exposed_nodes: Vec<u32>,
+    /// États de détection pour chaque nœud (Algorithm 15)
+    pub detection_states: HashMap<u32, DetectionState>,
+    /// Challenges en attente pour les nœuds suspects
+    pub pending_challenges: HashMap<u32, Vec<PendingChallenge>>,
 }
 
 impl PeerReviewNode {
@@ -81,6 +100,8 @@ impl PeerReviewNode {
             stored_authenticators: HashMap::new(),
             challenge_threshold: 10,
             exposed_nodes: Vec::new(),
+            detection_states: HashMap::new(),
+            pending_challenges: HashMap::new(),
         }
     }
 

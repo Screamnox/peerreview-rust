@@ -57,7 +57,7 @@ impl PeerReviewNode {
     /// Algorithm 3: Vérification d'un message type SEND de i par j
     /// Vérifie le hash et la signature d'un message SEND
     pub fn verify_send_message(
-        &self,
+        &mut self,
         msg: &PeerReviewMessage,
         sender_id: u32,
         sender_public_key: &ed25519_dalek::PublicKey,
@@ -148,6 +148,15 @@ impl PeerReviewNode {
                 hex::encode(h_k_computed),
                 sender_id
             );
+            
+            // APPEL AU PROTOCOLE EVIDENCE pour propager la preuve
+            println!(
+                "[Commitment] Détection de signature invalide du nœud {}",
+                sender_id
+            );
+            println!("[Commitment] → Appel du protocole Evidence pour propager la preuve\n");
+            self.report_invalid_signature_to_evidence(sender_id, "Signature invalide dans message SEND");
+            
             return false;
         }
 
@@ -175,9 +184,9 @@ impl PeerReviewNode {
         msg: &PeerReviewMessage,
         sender_id: u32,
     ) -> std::io::Result<Option<PeerReviewMessage>> {
-        // Récupérer la clé publique de l'envoyeur
+        // Récupérer la clé publique de l'envoyeur (clone pour éviter les problèmes de borrow)
         let sender_public_key = match self.peer_public_keys.get(&sender_id) {
-            Some(key) => key,
+            Some(key) => key.clone(),
             None => {
                 println!(
                     "[Nœud {}] Erreur: Clé publique du nœud {} non enregistrée",
@@ -188,7 +197,7 @@ impl PeerReviewNode {
         };
 
         // Étape 2: Vérifier la validité du message
-        let is_valid = self.verify_send_message(msg, sender_id, sender_public_key);
+        let is_valid = self.verify_send_message(msg, sender_id, &sender_public_key);
 
         if !is_valid {
             // Étape 9: Envoyer un challenge d'audit pour les témoins de i, W(i)
@@ -317,6 +326,15 @@ impl PeerReviewNode {
                 "[Nœud {}] Erreur: Signature invalide de l'acquittement du nœud {}",
                 self.node_id, receiver_id
             );
+            
+            // APPEL AU PROTOCOLE EVIDENCE pour propager la preuve
+            println!(
+                "[Commitment] Détection de signature invalide du nœud {}",
+                receiver_id
+            );
+            println!("[Commitment] → Appel du protocole Evidence pour propager la preuve\n");
+            self.report_invalid_signature_to_evidence(receiver_id, "Signature invalide dans acquittement RECV");
+            
             return false;
         }
 
@@ -406,5 +424,45 @@ impl PeerReviewNode {
         );
 
         Ok(false)
+    }
+
+    /// Signale une signature invalide au protocole Evidence pour propagation
+    fn report_invalid_signature_to_evidence(&mut self, faulty_node_id: u32, reason: &str) {
+        use super::evidence::EvidenceType;
+        use super::node::DetectionState;
+        
+        // Marquer le nœud comme suspect puis exposé
+        self.set_detection_state(faulty_node_id, DetectionState::Exposed);
+        
+        // Récupérer les logs comme preuve
+        let logs = self.logger.get_log(5).unwrap_or_default();
+        
+        // Créer une preuve d'exposition
+        use super::evidence::ExposureProof;
+        let _proof = ExposureProof {
+            witness_id: self.node_id,
+            exposed_node_id: faulty_node_id,
+            evidence_type: EvidenceType::InvalidSignature,
+            logs,
+            reason: reason.to_string(),
+        };
+        
+        // Propager via Evidence
+        let witnesses = self.get_witnesses(faulty_node_id);
+        
+        println!(
+            "[Commitment → Evidence] Diffusion de la preuve aux {} témoin(s) du nœud {}",
+            witnesses.len(),
+            faulty_node_id
+        );
+
+        for witness_id in witnesses {
+            println!(
+                "[Commitment → Evidence] → Témoin {} : Preuve de signature invalide",
+                witness_id
+            );
+            // Dans une vraie implémentation, envoyer via le réseau
+            // self.network.send_evidence_proof(witness_id, proof.clone());
+        }
     }
 }

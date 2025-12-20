@@ -249,9 +249,53 @@ impl PeerReviewNode {
     }
 
     /// Marque un nœud comme EXPOSED (fautif)
+    /// APPELLE le protocole Evidence pour propager les preuves
     fn mark_as_exposed(&mut self, node_id: u32, reason: &str) {
+        // Déterminer le type de preuve selon la raison
+        use super::evidence::EvidenceType;
+        let evidence_type = if reason.contains("Signature") {
+            if reason.contains("Ed25519") {
+                EvidenceType::InvalidSignature
+            } else {
+                EvidenceType::SignatureMismatch
+            }
+        } else if reason.contains("hash") || reason.contains("Hash") {
+            EvidenceType::BrokenHashChain
+        } else {
+            EvidenceType::SignatureMismatch
+        };
+
+        println!(
+            "\n[Consistency] Détection d'incohérence sur le nœud {}",
+            node_id
+        );
+        println!("[Consistency] Raison: {}", reason);
+        println!("[Consistency] Type de preuve: {:?}", evidence_type);
+        println!("[Consistency] → Appel du protocole Evidence pour propager les preuves\n");
+
+        // Appeler le protocole Evidence pour gérer l'exposition et diffuser les preuves
+        use super::node::DetectionState;
+        self.set_detection_state(node_id, DetectionState::Exposed);
+        
+        // Récupérer les logs comme preuve
+        let logs = self.logger.get_log(10).unwrap_or_default();
+        
+        // Créer une preuve d'exposition
+        use super::evidence::ExposureProof;
+        let proof = ExposureProof {
+            witness_id: self.node_id,
+            exposed_node_id: node_id,
+            evidence_type,
+            logs,
+            reason: reason.to_string(),
+        };
+        
+        // TOUJOURS propager la preuve via le protocole Evidence (même si déjà exposé)
+        self.propagate_exposure_proof_via_evidence(proof);
+        
         if !self.exposed_nodes.contains(&node_id) {
             self.exposed_nodes.push(node_id);
+            
             println!(
                 "\n⚠️  [Témoin {}] NŒUD {} MARQUÉ COMME EXPOSED ⚠️",
                 self.node_id, node_id
@@ -260,9 +304,24 @@ impl PeerReviewNode {
         }
     }
 
-    /// Vérifie si un nœud est exposé
-    pub fn is_exposed(&self, node_id: u32) -> bool {
-        self.exposed_nodes.contains(&node_id)
+    /// Propage une preuve d'exposition via le protocole Evidence
+    fn propagate_exposure_proof_via_evidence(&self, proof: super::evidence::ExposureProof) {
+        let witnesses = self.get_witnesses(proof.exposed_node_id);
+
+        println!(
+            "[Consistency → Evidence] Diffusion de la preuve aux {} témoin(s) du nœud {}",
+            witnesses.len(),
+            proof.exposed_node_id
+        );
+
+        for witness_id in witnesses {
+            println!(
+                "[Consistency → Evidence] → Témoin {} : Preuve d'exposition (type: {:?})",
+                witness_id, proof.evidence_type
+            );
+            // Dans une vraie implémentation, envoyer via le réseau
+            // self.network.send_evidence_proof(witness_id, proof.clone());
+        }
     }
 
     /// Retourne la liste des nœuds exposés

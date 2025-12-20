@@ -275,6 +275,16 @@ impl PeerReviewNode {
         let last_entry = &log_segment[log_segment.len() - 1];
 
         if first_entry.sig != challenge.sig_min {
+            // APPEL AU PROTOCOLE EVIDENCE
+            println!(
+                "[Challenge_Response] Signature e_min ne correspond pas à α_j_min"
+            );
+            println!("[Challenge_Response] → Appel du protocole Evidence\n");
+            self.report_signature_mismatch_to_evidence(
+                challenge.target_id,
+                "Signature e_min ne correspond pas à α_j_min dans challenge d'audit"
+            );
+            
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "La signature de e_min ne correspond pas à α_j_min",
@@ -282,6 +292,16 @@ impl PeerReviewNode {
         }
 
         if last_entry.sig != challenge.sig_max {
+            // APPEL AU PROTOCOLE EVIDENCE
+            println!(
+                "[Challenge_Response] Signature e_max ne correspond pas à α_j_max"
+            );
+            println!("[Challenge_Response] → Appel du protocole Evidence\n");
+            self.report_signature_mismatch_to_evidence(
+                challenge.target_id,
+                "Signature e_max ne correspond pas à α_j_max dans challenge d'audit"
+            );
+            
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "La signature de e_max ne correspond pas à α_j_max",
@@ -504,6 +524,46 @@ impl PeerReviewNode {
             target_id,
             message,
             signature,
+        }
+    }
+
+    /// Signale une incompatibilité de signature au protocole Evidence
+    fn report_signature_mismatch_to_evidence(&mut self, faulty_node_id: u32, reason: &str) {
+        use super::evidence::EvidenceType;
+        use super::node::DetectionState;
+        
+        // Marquer le nœud comme exposé
+        self.set_detection_state(faulty_node_id, DetectionState::Exposed);
+        
+        // Récupérer les logs comme preuve
+        let logs = self.logger.get_log(10).unwrap_or_default();
+        
+        // Créer une preuve d'exposition
+        use super::evidence::ExposureProof;
+        let _proof = ExposureProof {
+            witness_id: self.node_id,
+            exposed_node_id: faulty_node_id,
+            evidence_type: EvidenceType::SignatureMismatch,
+            logs,
+            reason: reason.to_string(),
+        };
+        
+        // Propager via Evidence
+        let witnesses = self.get_witnesses(faulty_node_id);
+        
+        println!(
+            "[Challenge_Response → Evidence] Diffusion de la preuve aux {} témoin(s) du nœud {}",
+            witnesses.len(),
+            faulty_node_id
+        );
+
+        for witness_id in witnesses {
+            println!(
+                "[Challenge_Response → Evidence] → Témoin {} : Preuve de signature différente",
+                witness_id
+            );
+            // Dans une vraie implémentation, envoyer via le réseau
+            // self.network.send_evidence_proof(witness_id, proof.clone());
         }
     }
 }

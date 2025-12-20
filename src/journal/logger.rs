@@ -22,18 +22,9 @@ pub struct Logger {
     line_current: usize,
     file: File,
     hash: [u8; 32],
-    keypair: ed25519_dalek::Keypair,
 }
 
 impl Logger {
-    fn generate_keypair() -> Keypair {
-        use ed25519_dalek::Keypair;
-        use rand::rngs::OsRng;
-
-        let mut rng = OsRng;
-        Keypair::generate(&mut rng)
-    }
-
     /// Remplit le fichier avec des lignes fictives (format standard)
     fn initialize_file(path: &str, line_max: usize, min_line_size: usize) -> std::io::Result<()> {
         let mut file = File::create(path)?;
@@ -111,21 +102,13 @@ impl Logger {
         }
         file = File::options().read(true).write(true).open(path)?;
 
-        let keypair = Self::generate_keypair();
-
         Ok(Self {
             s_k,
             line_max,
             line_current,
             file,
             hash,
-            keypair,
         })
-    }
-
-    /// Retourne la clé publique du Logger
-    pub fn get_public_key(&self) -> &ed25519_dalek::PublicKey {
-        &self.keypair.public
     }
 
     /// Ajoute une entrée recv au journal
@@ -178,10 +161,13 @@ impl Logger {
         Ok(())
     }
 
-    //---------------------------------------------------------------------------------------------------------
-
     /// Ajoute une entrée send au journal
-    pub fn log_send(&mut self, correspondent: u32, msg: &str) -> std::io::Result<[u8; 64]> {
+    pub fn log_send(
+        &mut self,
+        correspondent: u32,
+        msg: &str,
+        key: &mut Keypair,
+    ) -> std::io::Result<[u8; 64]> {
         self.s_k += 1;
 
         if self.line_current >= self.line_max {
@@ -209,7 +195,7 @@ impl Logger {
         buf[8..].copy_from_slice(&hash);
 
         let mut sig = [0u8; 64];
-        sig.copy_from_slice(&self.keypair.sign(&buf).to_bytes());
+        sig.copy_from_slice(&key.sign(&buf).to_bytes());
 
         let s_k_corr: usize = 0;
         let logentry = LogEntry {
@@ -265,5 +251,10 @@ impl Logger {
             count += 1;
         }
         Ok(result)
+    }
+
+    /// Renvoie le hash actuel de la chaine de hachage
+    pub fn get_current_hash(&self) -> [u8; 32] {
+        self.hash
     }
 }

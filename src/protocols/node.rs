@@ -50,6 +50,7 @@ pub struct PeerReviewNode {
     pub node_id: u32,
     pub logger: Logger,
     pub prev_hash: [u8; 32],
+    pub keypair: ed25519_dalek::Keypair,
     pub peer_public_keys: HashMap<u32, ed25519_dalek::PublicKey>,
     /// Configuration des témoins : HashMap<node_id, Vec<witness_ids>>
     /// Tous les nœuds connaissent les témoins de tous les autres nœuds
@@ -71,6 +72,7 @@ impl PeerReviewNode {
     pub fn new(
         node_id: u32,
         mut logger: Logger,
+        keypair: ed25519_dalek::Keypair,
         witnesses_map: HashMap<u32, Vec<u32>>,
         peer_public_keys: HashMap<u32, ed25519_dalek::PublicKey>,
     ) -> Self {
@@ -95,6 +97,7 @@ impl PeerReviewNode {
             node_id,
             logger,
             prev_hash,
+            keypair,
             peer_public_keys,
             witnesses_map,
             stored_authenticators: HashMap::new(),

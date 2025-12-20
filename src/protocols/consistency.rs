@@ -35,7 +35,7 @@ impl PeerReviewNode {
 
         // Logger le challenge
         let challenge_msg = format!("CONSISTENCY_CHALLENGE: {} logs demandés", seq_nums.len());
-        self.logger.log_send(observed_node_id, &challenge_msg)?;
+        self.logger.log_send(observed_node_id, &challenge_msg, &mut self.keypair)?;
 
         // Mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;
@@ -78,7 +78,7 @@ impl PeerReviewNode {
             "CONSISTENCY_RESPONSE: {} logs envoyés",
             requested_logs.len()
         );
-        self.logger.log_send(challenge.witness_id, &response_msg)?;
+        self.logger.log_send(challenge.witness_id, &response_msg, &mut self.keypair)?;
 
         // Mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;

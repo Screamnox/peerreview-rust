@@ -22,7 +22,7 @@ impl PeerReviewNode {
         // Étape 2: Logger l'entrée SEND - le Logger calcule automatiquement:
         //   - hk = H(hk-1 || sk || SEND || H(ck))
         //   - αk = signature de (sk || hk)
-        self.logger.log_send(receiver_id, message)?;
+        self.logger.log_send(receiver_id, message, &mut self.keypair)?;
 
         // Étape 3: Récupérer les informations de l'entrée qu'on vient de créer
         // On récupère directement depuis le Logger au lieu d'utiliser get_log()
@@ -224,7 +224,7 @@ impl PeerReviewNode {
         let recv_hash = log_entry_recv.hash;
 
         // Étape 5: Créer une entrée de log SEND pour l'acquittement (cl+1 = {i})
-        self.logger.log_send(sender_id, "")?;
+        self.logger.log_send(sender_id, "", &mut self.keypair)?;
 
         // Récupérer l'entrée SEND (acquittement)
         let logs_ack = self.logger.get_log(1)?;
@@ -354,7 +354,7 @@ impl PeerReviewNode {
     /// Crée un challenge d'audit pour signaler un problème
     fn create_audit_challenge(&mut self, target_node: u32, reason: &str) -> std::io::Result<()> {
         let challenge_msg = format!("CHALLENGE_AUDIT: {}", reason);
-        self.logger.log_send(target_node, &challenge_msg)?;
+        self.logger.log_send(target_node, &challenge_msg, &mut self.keypair)?;
 
         // Récupérer la dernière entrée pour mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;
@@ -412,7 +412,7 @@ impl PeerReviewNode {
 
         // Pas d'acquittement ou invalide - créer un challenge d'envoi
         let challenge_msg = "CHALLENGE_SEND: Timeout - pas d'acquittement";
-        self.logger.log_send(receiver_id, challenge_msg)?;
+        self.logger.log_send(receiver_id, challenge_msg, &mut self.keypair)?;
 
         // Récupérer la dernière entrée pour mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;

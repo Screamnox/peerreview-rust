@@ -211,7 +211,7 @@ impl PeerReviewNode {
 
         // Logger le challenge dans notre journal
         let challenge_msg = format!("CHALLENGE_{}: {}", challenge_type, target_id);
-        self.logger.log_send(target_id, &challenge_msg)?;
+        self.logger.log_send(target_id, &challenge_msg, &mut self.keypair)?;
 
         // Mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;
@@ -354,7 +354,7 @@ impl PeerReviewNode {
             challenge.seq_max
         );
         self.logger
-            .log_send(challenge.challenger_id, &response_msg)?;
+            .log_send(challenge.challenger_id, &response_msg, &mut self.keypair)?;
 
         // Mettre à jour prev_hash
         let logs = self.logger.get_log(1)?;

@@ -21,17 +21,26 @@ fn main() -> std::io::Result<()> {
     println!("Témoin 3 : témoin = {:?}", witnesses_map.get(&3).unwrap());
     println!("Témoin 4 : témoin = {:?}\n", witnesses_map.get(&4).unwrap());
 
+    // Générer les keypairs pour chaque nœud
+    use ed25519_dalek::Keypair;
+    use rand::rngs::OsRng;
+    let mut rng = OsRng;
+    
+    let keypair1 = Keypair::generate(&mut rng);
+    let keypair2 = Keypair::generate(&mut rng);
+    let keypair3 = Keypair::generate(&mut rng);
+    let keypair4 = Keypair::generate(&mut rng);
+    
+    let node1_public_key = keypair1.public;
+    let node2_public_key = keypair2.public;
+    let node3_public_key = keypair3.public;
+    let node4_public_key = keypair4.public;
+
     // Création des loggers
     let logger_node1 = Logger::new("node1_journal.log", 5000, 200)?;
     let logger_node2 = Logger::new("node2_journal.log", 5000, 200)?;
     let logger_node3 = Logger::new("node3_journal.log", 5000, 200)?;
     let logger_node4 = Logger::new("node4_journal.log", 5000, 200)?;
-
-    // Récupérer les clés publiques
-    let node1_public_key = *logger_node1.get_public_key();
-    let node2_public_key = *logger_node2.get_public_key();
-    let node3_public_key = *logger_node3.get_public_key();
-    let node4_public_key = *logger_node4.get_public_key();
 
     // Configuration des clés publiques pour chaque nœud
     let mut peer_keys_node1 = std::collections::HashMap::new();
@@ -54,11 +63,11 @@ fn main() -> std::io::Result<()> {
     peer_keys_node4.insert(2, node2_public_key);
     peer_keys_node4.insert(3, node3_public_key);
 
-    // Création des nœuds
-    let mut node1 = PeerReviewNode::new(1, logger_node1, witnesses_map.clone(), peer_keys_node1);
-    let mut node2 = PeerReviewNode::new(2, logger_node2, witnesses_map.clone(), peer_keys_node2);
-    let mut node3 = PeerReviewNode::new(3, logger_node3, witnesses_map.clone(), peer_keys_node3);
-    let mut node4 = PeerReviewNode::new(4, logger_node4, witnesses_map.clone(), peer_keys_node4);
+    // Création des nœuds (avec leurs keypairs)
+    let mut node1 = PeerReviewNode::new(1, logger_node1, keypair1, witnesses_map.clone(), peer_keys_node1);
+    let mut node2 = PeerReviewNode::new(2, logger_node2, keypair2, witnesses_map.clone(), peer_keys_node2);
+    let mut node3 = PeerReviewNode::new(3, logger_node3, keypair3, witnesses_map.clone(), peer_keys_node3);
+    let mut node4 = PeerReviewNode::new(4, logger_node4, keypair4, witnesses_map.clone(), peer_keys_node4);
 
     println!("✓ 4 nœuds initialisés\n");
 

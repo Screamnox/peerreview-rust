@@ -218,11 +218,18 @@ impl Logger {
     }
 
     ///Cette fonction a pour objectif de renvoyer le nombre de log demandé passé en paramètre du plus récent au plus ancien (trié par s_k)
-    pub fn get_log(&mut self, mut nb_log: usize) -> std::io::Result<Vec<LogEntry>> {
+    pub fn get_log(&mut self, s_k_start: usize, s_k_end: usize) -> std::io::Result<Vec<LogEntry>> {
         self.file.seek(SeekFrom::Start(0))?;
         let reader = BufReader::new(&self.file);
-        let mut count: usize = 0;
+        let size: usize = s_k_end-s_k_start;
         let lines = reader.lines().collect::<Result<Vec<String>, _>>()?;
+
+        if size > self.line_max {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "La taille demandé résultante de s_k_start et s_k_end est supérieur à la taille de stockage du log",
+                ))
+        }
 
         // Si aucun log n'a été écrit, retourner un vecteur vide
         if self.line_current == 0 {
@@ -230,25 +237,23 @@ impl Logger {
         }
 
         let mut id: usize = self.line_current - 1;
-        nb_log = nb_log.min(lines.len());
-        let mut result = Vec::with_capacity(nb_log);
+        let mut result = Vec::with_capacity(size);
+        let mut finished: bool = false;
+        let mut entry: LogEntry;
 
-        while count < nb_log {
-            match LogEntry::deserialize(&lines[id]) {
-                Ok(entry) => result.push(entry),
-                Err(_) => {
-                    eprintln!(
-                        "get_log : Format de ligne incorrect !, Vec<LogEntry> retourné avec les précédentes valeurs"
-                    );
-                    break;
+        while !finished {
+            entry = LogEntry::deserialize(&lines[id])?;
+            if entry.s_k <= s_k_end{
+                if entry.s_k == s_k_start {
+                    finished = true;
                 }
+                result.push(entry);
             }
             if id == 0 {
                 id += lines.len() - 1;
             } else {
                 id -= 1;
             }
-            count += 1;
         }
         Ok(result)
     }

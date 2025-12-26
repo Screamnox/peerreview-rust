@@ -1,4 +1,4 @@
-use crate::journal::Logger;
+use crate::journal::{Logger, entry::LogEntry};
 use std::collections::HashMap;
 
 /// Type de message : Send ou Recv
@@ -185,5 +185,110 @@ impl PeerReviewNode {
         } else {
             false
         }
+    }
+
+    /// Algorithme 9 : Audit d’un nœud i
+    pub fn perform_audit(
+        &mut self,
+        target_id: u32,
+        ) -> std::io::Result<()> 
+    {
+        println!("[Nœud {}] Début de l’audit du nœud {}", self.node_id, target_id);
+
+        // 1. Récupérer le dernier authenticator α_i_k
+
+        let auth_table = &self.stored_authenticators[&target_id];
+        let alpha_k = &auth_table[auth_table.len()];
+
+        let last_s_k = alpha_k.seq_num;
+
+        // 2. Envoyer le challenge d’audit
+        println!(
+            "[Nœud {}] Audit Request envoyé à {} (s_k_start={})",
+            self.node_id, target_id, last_s_k
+        );
+
+        // 3. Récupération des nouveaux logs
+        println!(
+            "[Noeud {}] Reception des logs de {}",
+            self.node_id, target_id
+        );
+
+        /* TODO : Cette partie est normalement faite à distance, il s'agit directement du résultat*/
+        let log_peer = self.logger.get_log(last_s_k, self.logger.s_k)?;
+
+        // 4. Rejouer avec Algo 10
+        self.replay_and_verify(target_id, log_peer)?;
+
+        Ok(())
+    }
+
+    /// Algorithme 10 : Replay & Verification
+    pub fn replay_and_verify(
+        &mut self,
+        target_id: u32,
+        log_peer: Vec<LogEntry>
+    ) -> std::io::Result<()> 
+    {
+        /*println!(
+            "[Nœud {}] Rejoue le journal de {} depuis snapshot {}",
+            self.node_id, target_id, state.last_snapshot
+        );
+
+        // 1. Instance de référence de Si
+        let mut reference_node = PeerReviewNode::new(self.node_id, self.logger.clone());
+
+        // 2. Charger le snapshot (ici simplifié : on ne stocke pas l'état applicatif → TODO)
+        // Dans un vrai système, faudrait recharger l'état applicatif associé.
+        // Pour le moment on assume que "snapshot = last_snapshot".
+
+        // 3. Rejouer toutes les entrées depuis le snapshot
+        for i in state.last_snapshot..state.logs_copy.len() {
+            let entry = &state.logs_copy[i];
+
+            println!(
+                "[Nœud {}] Replay entrée {}: {:?}",
+                self.node_id, entry.s_k, entry.log_type
+            );
+
+            // Ici tu dois "rejouer" réellement les opérations.
+            // Cela dépend de ton application.
+            //
+            // Exemple simplifié : juste recompute hash & signature
+            // et comparer avec celui enregistré.
+            //
+            // Dans un vrai PeerReview, on rejoue l'application entière.
+
+            let recomputed_hash = reference_node.logger.recompute_hash(entry)?;
+
+            if recomputed_hash != entry.hash {
+                println!(
+                    "[Nœud {}] ❌ Divergence détectée à s_k={}",
+                    self.node_id, entry.s_k
+                );
+                println!(
+                    "Attendu : {}\nRecalculé : {}",
+                    hex::encode(entry.hash),
+                    hex::encode(recomputed_hash),
+                );
+
+                // Preuve d'exposition
+                println!(
+                    "[Nœud {}] Nœud {} exposé (α_k, suffixe du journal fourni)",
+                    self.node_id, target_id
+                );
+                return Ok(());
+            }
+        }
+
+        println!(
+            "[Nœud {}] ✓ Journal de {} vérifié sans divergence",
+            self.node_id,
+            target_id
+        );
+
+        // Mise à jour du snapshot
+        state.last_snapshot = state.logs_copy.len();*/
+        Ok(())
     }
 }

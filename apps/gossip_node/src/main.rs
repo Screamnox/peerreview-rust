@@ -76,8 +76,10 @@ struct NodeState {
     inbox: Arc<Mutex<VecDeque<String>>>,
     // buffers pour flux binaires (file_id -> BinaryFileBuffer)
     binary_buffers: Arc<Mutex<HashMap<String, BinaryFileBuffer>>>,
-    // canal d'envoi TCP
+    // canal d'envoi TCP (APP)
     tx_send: mpsc::Sender<(Peer, Vec<u8>)>,
+    // canal interne APP -> PR (tests / future intégration PeerReview)
+    tx_to_pr: mpsc::Sender<String>,
 }
 
 #[derive(Serialize)]
@@ -108,7 +110,6 @@ fn make_orders(nodes: &[Peer], num_trees: usize) -> Vec<Vec<Peer>> {
 
 // enfants k-aires d'un noeud (id) dans un ordre donné
 fn kary_children(order: &[Peer], my_id: &str, k: usize) -> Vec<Peer> {
-    let n = order.len();
     let i = order
         .iter()
         .position(|p| p.id == my_id)
@@ -116,75 +117,70 @@ fn kary_children(order: &[Peer], my_id: &str, k: usize) -> Vec<Peer> {
     let mut v = Vec::new();
     for j in 1..=k {
         let idx = i * k + j;
-        if idx < n {
+        if idx < order.len() {
             v.push(order[idx].clone());
         }
     }
     v
 }
 
-/// ----------------- HTTP Handlers -----------------
+// push dans inbox (cap 200)
+fn inbox_push(st: &Arc<NodeState>, line: String) {
+    let mut q = st.inbox.lock();
+    q.push_back(line);
+    if q.len() > 200 {
+        q.pop_front();
+    }
+}
+
+/// ----------------- HTTP handlers -----------------
 
 #[derive(Deserialize)]
-struct PublishIn {
+struct PublishInput {
     payload: String,
 }
 
-async fn stats(State(st): State<Arc<NodeState>>) -> Json<Stats> {
-    let mut last = Vec::new();
-    {
-        let mut q = st.inbox.lock();
-        let take = q.len().min(10);
-        for _ in 0..take {
-            if let Some(s) = q.pop_back() {
-                last.push(s);
-            }
-        }
-        // remettre pour garder l'historique
-        for s in last.iter().rev() {
-            q.push_back(s.clone());
-        }
+async fn get_stats(State(st): State<Arc<NodeState>>) -> Json<Stats> {
+    let known_count = st.known_msgs.len();
+    let mut last_msgs: Vec<String> = st.inbox.lock().iter().cloned().collect();
+    if last_msgs.len() > 15 {
+        last_msgs = last_msgs[last_msgs.len() - 15..].to_vec();
     }
     Json(Stats {
         node_id: st.my_id.clone(),
-        known_count: st.known_msgs.len(),
-        last_msgs: last,
+        known_count,
+        last_msgs,
         trees: st.children_by_tree.len(),
     })
 }
 
-async fn publish(
-    State(st): State<Arc<NodeState>>,
-    Json(input): Json<PublishIn>,
-) -> Json<&'static str> {
-    // duplique le même message sur tous les arbres
+async fn post_publish(State(st): State<Arc<NodeState>>, Json(input): Json<PublishInput>) -> Json<&'static str> {
+    // 1) événement APP -> PR (Test C)
+    let _ = st
+        .tx_to_pr
+        .send(format!("EVENT publish(text='{}')", input.payload))
+        .await;
+
+    // 2) diffusion normale APP (multi-arbres)
     for tt in 0u8..(st.children_by_tree.len() as u8) {
         let msg = Msg {
             id: uuid::Uuid::new_v4().to_string(),
             from: st.my_id.clone(),
             kind: MsgKind::PublishText,
-            payload: input.payload.clone().into_bytes(),
+            payload: input.payload.as_bytes().to_vec(),
             ts_ms: now_ms(),
             tree_id: tt,
         };
 
-        // marquer connu localement + journal local minimal
         st.known_msgs.insert((tt, msg.id.clone()));
-        {
-            let mut q = st.inbox.lock();
-            q.push_back(format!(
-                "(local t{}) {}",
-                tt,
-                String::from_utf8_lossy(&msg.payload)
-            ));
-            if q.len() > 200 {
-                q.pop_front();
-            }
-        }
+        inbox_push(
+            &st,
+            format!("(local t{} from {}) {}", tt, st.my_id, input.payload),
+        );
 
         let bytes = bincode::serialize(&msg).unwrap();
-        for p in st.children_by_tree[tt as usize].iter() {
-            let _ = st.tx_send.send((p.clone(), bytes.clone())).await;
+        for peer in &st.children_by_tree[tt as usize] {
+            let _ = st.tx_send.send((peer.clone(), bytes.clone())).await;
         }
     }
 
@@ -192,23 +188,29 @@ async fn publish(
 }
 
 #[derive(Deserialize)]
-struct PublishBinaryDemoIn {
+struct PublishBinaryDemoInput {
     file_id: String,
     total_size: usize,
     chunk_size: usize,
 }
 
-/// Démo : envoie un flux binaire simulé (octets aléatoires) découpé en chunks,
-/// diffusé sur tous les arbres.
-async fn publish_binary_demo(
+async fn post_publish_binary_demo(
     State(st): State<Arc<NodeState>>,
-    Json(input): Json<PublishBinaryDemoIn>,
+    Json(input): Json<PublishBinaryDemoInput>,
 ) -> Json<&'static str> {
+    // événement APP -> PR (Test C)
+    let _ = st
+        .tx_to_pr
+        .send(format!(
+            "EVENT publish_binary(file_id={}, total_size={}, chunk_size={})",
+            input.file_id, input.total_size, input.chunk_size
+        ))
+        .await;
+
     let total_size = input.total_size;
     let chunk_size = input.chunk_size.max(1);
     let num_chunks = (total_size + chunk_size - 1) / chunk_size;
 
-    // Génère un buffer binaire aléatoire (simulation de fichier/vidéo)
     let mut data = vec![0u8; total_size];
     rand::thread_rng().fill_bytes(&mut data);
 
@@ -235,28 +237,23 @@ async fn publish_binary_demo(
                 tree_id: tt,
             };
 
-            // dédoublon local
             st.known_msgs.insert((tt, msg.id.clone()));
 
-            // log minimal dans l'inbox (côté émetteur)
-            {
-                let mut q = st.inbox.lock();
-                q.push_back(format!(
+            inbox_push(
+                &st,
+                format!(
                     "(local BIN t{} {} chunk {}/{} size={})",
                     tt,
                     input.file_id,
                     i + 1,
                     num_chunks,
-                    slice.len(),
-                ));
-                if q.len() > 200 {
-                    q.pop_front();
-                }
-            }
+                    slice.len()
+                ),
+            );
 
             let bytes = bincode::serialize(&msg).unwrap();
-            for p in st.children_by_tree[tt as usize].iter() {
-                let _ = st.tx_send.send((p.clone(), bytes.clone())).await;
+            for peer in &st.children_by_tree[tt as usize] {
+                let _ = st.tx_send.send((peer.clone(), bytes.clone())).await;
             }
         }
     }
@@ -264,35 +261,23 @@ async fn publish_binary_demo(
     Json("ok")
 }
 
-/// ----------------- main -----------------
+/// ----------------- Main -----------------
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    eprintln!("CWD = {:?}", std::env::current_dir().unwrap());
-    eprintln!("args = {:?}", std::env::args().collect::<Vec<_>>());
-    if std::fs::metadata(&args.config).is_err() {
-        eprintln!("❌ config introuvable: {}", &args.config);
-    }
-    if std::fs::metadata(&args.cluster).is_err() {
-        eprintln!("❌ cluster introuvable: {}", &args.cluster);
-    }
-
+    // Load configs
     let node_cfg: NodeCfg = serde_yaml::from_str(&fs::read_to_string(&args.config)?)?;
-    let cluster_cfg: ClusterCfg =
-        serde_yaml::from_str(&fs::read_to_string(&args.cluster)?)?;
+    let cluster_cfg: ClusterCfg = serde_yaml::from_str(&fs::read_to_string(&args.cluster)?)?;
 
-    // Paramètres multi-arbres
-    let k = cluster_cfg.fanout.max(1);
-    let t = cluster_cfg.num_trees.max(1);
-
-    let orders = make_orders(&cluster_cfg.nodes, t);
-
-    // Enfants par arbre pour CE noeud
-    let mut children_by_tree: Vec<Vec<Peer>> = Vec::with_capacity(t);
-    for ord in &orders {
-        children_by_tree.push(kary_children(ord, &node_cfg.id, k));
+    // Build trees
+    let orders = make_orders(&cluster_cfg.nodes, cluster_cfg.num_trees);
+    let mut children_by_tree: Vec<Vec<Peer>> = Vec::with_capacity(cluster_cfg.num_trees);
+    for t in 0..cluster_cfg.num_trees {
+        let order = &orders[t];
+        let ch = kary_children(order, &node_cfg.id, cluster_cfg.fanout);
+        children_by_tree.push(ch);
     }
 
     println!(
@@ -325,8 +310,13 @@ async fn main() -> Result<()> {
     let pr_listener = TcpListener::bind(pr_listen).await?;
     println!("{} listening PR  on TCP {}", node_cfg.id, pr_listen);
 
-    // Canal d'envoi
+    // Canal d'envoi APP
     let (tx, mut rx) = mpsc::channel::<(Peer, Vec<u8>)>(2048);
+
+    // --- Bus interne APP ↔ PR (dans un nœud) ---
+    // Test C: prouve qu'APP et PR (2 tâches) peuvent s'échanger des messages.
+    let (tx_to_pr, mut rx_from_app) = mpsc::channel::<String>(256);
+    let (tx_to_app, mut rx_from_pr) = mpsc::channel::<String>(256);
 
     // État partagé
     let st = NodeState {
@@ -336,22 +326,44 @@ async fn main() -> Result<()> {
         inbox: Arc::new(Mutex::new(VecDeque::new())),
         binary_buffers: Arc::new(Mutex::new(HashMap::new())),
         tx_send: tx.clone(),
+        tx_to_pr: tx_to_pr.clone(),
     };
     let st = Arc::new(st);
 
-    // Tâche d'envoi TCP (avec mini backoff au boot)
+    // PR -> APP : tout ce qui arrive de PR (ACK ou events PR) est visible via /stats
+    {
+        let stc = st.clone();
+        tokio::spawn(async move {
+            while let Some(line) = rx_from_pr.recv().await {
+                inbox_push(&stc, format!("(PR→APP) {}", line));
+            }
+        });
+    }
+
+    // APP -> PR : le thread PR reçoit des événements APP et renvoie un ACK vers APP
+    {
+        let my_id = st.my_id.clone();
+        let tx_to_app = tx_to_app.clone();
+        tokio::spawn(async move {
+            while let Some(line) = rx_from_app.recv().await {
+                println!("[{}] PR got (APP→PR): {}", my_id, line);
+                let _ = tx_to_app
+                    .send(format!("ACK from PR: received '{}'", line))
+                    .await;
+            }
+        });
+    }
+
+    // Tâche d'envoi TCP (APP)
     {
         tokio::spawn(async move {
             while let Some((peer, bytes)) = rx.recv().await {
                 match TcpStream::connect(&peer.addr).await {
                     Ok(mut s) => {
-                        let _ = s
-                            .write_all(&(bytes.len() as u32).to_be_bytes())
-                            .await;
+                        let _ = s.write_all(&(bytes.len() as u32).to_be_bytes()).await;
                         let _ = s.write_all(&bytes).await;
                     }
-                    Err(_e) => {
-                        // au démarrage l'autre peut ne pas être prêt
+                    Err(_) => {
                         tokio::time::sleep(Duration::from_millis(150)).await;
                     }
                 }
@@ -359,9 +371,10 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Boucle de réception PR (pour l'instant : on logge juste les octets bruts)
+    // Boucle de réception PR (TCP PR): on log + on envoie un résumé vers APP via tx_to_app
     {
         let my_id = st.my_id.clone();
+        let tx_to_app = tx_to_app.clone();
         tokio::spawn(async move {
             loop {
                 let (mut sock, addr) = match pr_listener.accept().await {
@@ -373,6 +386,8 @@ async fn main() -> Result<()> {
                 };
                 println!("[{}] PR connection from {}", my_id, addr);
 
+                let tx_to_app2 = tx_to_app.clone();
+                let my_id2 = my_id.clone();
                 tokio::spawn(async move {
                     loop {
                         let mut len_buf = [0u8; 4];
@@ -384,27 +399,38 @@ async fn main() -> Result<()> {
                         if sock.read_exact(&mut buf).await.is_err() {
                             break;
                         }
-                        println!(
-                            "[{}] PR RAW {} bytes from {}",
-                            my_id, len, addr
-                        );
-                        // plus tard : bincode::deserialize::<PRMsg>(&buf)
+
+                        println!("[{}] PR RAW {} bytes from {}", my_id2, len, addr);
+
+                        let preview_len = len.min(16);
+                        let preview = buf[..preview_len]
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+
+                        let _ = tx_to_app2
+                            .send(format!(
+                                "RAW {} bytes from {} | first={} [{}]",
+                                len, addr, preview_len, preview
+                            ))
+                            .await;
                     }
                 });
             }
         });
     }
 
-    // Heartbeats par arbre (facultatif mais utile pour visualiser)
+    // Heartbeats APP
     {
         let stc = st.clone();
         let period = node_cfg.heartbeat_ms;
         tokio::spawn(async move {
             let mut counter = 0u64;
-            // petite pause pour laisser les pairs démarrer
-            tokio::time::sleep(Duration::from_millis(600)).await;
             loop {
+                tokio::time::sleep(Duration::from_millis(period)).await;
                 counter += 1;
+
                 for tt in 0u8..(stc.children_by_tree.len() as u8) {
                     let msg = Msg {
                         id: uuid::Uuid::new_v4().to_string(),
@@ -414,37 +440,36 @@ async fn main() -> Result<()> {
                         ts_ms: now_ms(),
                         tree_id: tt,
                     };
+
+                    stc.known_msgs.insert((tt, msg.id.clone()));
+
                     let bytes = bincode::serialize(&msg).unwrap();
-                    for p in stc.children_by_tree[tt as usize].iter() {
-                        let _ = stc.tx_send.send((p.clone(), bytes.clone())).await;
+                    for peer in &stc.children_by_tree[tt as usize] {
+                        let _ = stc.tx_send.send((peer.clone(), bytes.clone())).await;
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(period)).await;
             }
         });
     }
 
-    // HTTP API
+    // HTTP server
     {
-        let http_addr = SocketAddr::from(([0, 0, 0, 0], node_cfg.http_api));
+        let stc = st.clone();
+        let http_addr: SocketAddr = format!("0.0.0.0:{}", node_cfg.http_api).parse()?;
         let router = Router::new()
-            .route("/stats", get(stats))
-            .route("/publish", post(publish))
-            .route("/publish_binary_demo", post(publish_binary_demo))
-            .with_state(st.clone());
-        println!(
-            "{} HTTP on http://0.0.0.0:{}/",
-            node_cfg.id, node_cfg.http_api
-        );
+            .route("/stats", get(get_stats))
+            .route("/publish", post(post_publish))
+            .route("/publish_binary_demo", post(post_publish_binary_demo))
+            .with_state(stc);
+
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind(http_addr)
-                .await
-                .unwrap();
+            let listener = TcpListener::bind(http_addr).await.unwrap();
+            println!("HTTP on http://{}", http_addr);
             axum::serve(listener, router).await.unwrap();
         });
     }
 
-    // Réception TCP (socket APP : texte + binaire + heartbeats)
+    // Boucle de réception TCP APP : diffusion (texte/binaire/heartbeat)
     loop {
         let (mut sock, _addr) = app_listener.accept().await?;
         let stc = st.clone();
@@ -459,170 +484,90 @@ async fn main() -> Result<()> {
                 if sock.read_exact(&mut buf).await.is_err() {
                     break;
                 }
-                match bincode::deserialize::<Msg>(&buf) {
-                    Ok(msg) => {
-                        let key = (msg.tree_id, msg.id.clone());
-                        // dédoublon (tree_id, msg_id)
-                        if !stc.known_msgs.insert(key) {
-                            continue;
+
+                let msg: Msg = match bincode::deserialize(&buf) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+
+                let key = (msg.tree_id, msg.id.clone());
+                if !stc.known_msgs.insert(key) {
+                    continue;
+                }
+
+                match msg.kind {
+                    MsgKind::Heartbeat { counter, .. } => {
+                        inbox_push(
+                            &stc,
+                            format!(
+                                "(HB t{} #{} from {})",
+                                msg.tree_id, counter, msg.from
+                            ),
+                        );
+                    }
+                    MsgKind::PublishText => {
+                        let text = String::from_utf8_lossy(&msg.payload).to_string();
+                        inbox_push(
+                            &stc,
+                            format!("(t{} from {}) {}", msg.tree_id, msg.from, text),
+                        );
+                        let bytes = bincode::serialize(&msg).unwrap();
+                        for peer in &stc.children_by_tree[msg.tree_id as usize] {
+                            let _ = stc.tx_send.send((peer.clone(), bytes.clone())).await;
                         }
-
-                        match &msg.kind {
-                            MsgKind::Heartbeat { counter, .. } => {
-                                println!(
-                                    "[{}] HB t{} #{} from {}",
-                                    stc.my_id, msg.tree_id, counter, msg.from
+                    }
+                    MsgKind::PublishBinaryChunk => {
+                        let chunk: BinaryChunk = match bincode::deserialize(&msg.payload) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!(
+                                    "[{}] invalid BinaryChunk from {}: {e}",
+                                    stc.my_id, msg.from
                                 );
-                                // pas de reforward obligatoire pour les HB
+                                continue;
                             }
-                            MsgKind::PublishText => {
-                                // stocke un aperçu texte local
-                                let text =
-                                    String::from_utf8_lossy(&msg.payload)
-                                        .to_string();
-                                {
-                                    let mut q = stc.inbox.lock();
-                                    q.push_back(format!(
-                                        "(t{} from {}) {}",
-                                        msg.tree_id, msg.from, text
-                                    ));
-                                    if q.len() > 200 {
-                                        q.pop_front();
-                                    }
-                                }
+                        };
 
-                                // forward aux enfants de CET arbre
-                                let bytes =
-                                    bincode::serialize(&msg).unwrap();
-                                for p in stc.children_by_tree
-                                    [msg.tree_id as usize]
-                                    .iter()
-                                {
-                                    if p.id != stc.my_id {
-                                        let _ = stc.tx_send.send((
-                                            p.clone(),
-                                            bytes.clone(),
-                                        ));
-                                    }
+                        {
+                            let mut buffers = stc.binary_buffers.lock();
+                            let entry = buffers.entry(chunk.file_id.clone()).or_insert_with(|| {
+                                BinaryFileBuffer {
+                                    total_chunks: chunk.total_chunks,
+                                    received: HashMap::new(),
                                 }
-                            }
-                            MsgKind::PublishBinaryChunk => {
-                                // désérialiser le chunk
-                                let chunk: BinaryChunk = match bincode
-                                    ::deserialize(&msg.payload)
-                                {
-                                    Ok(c) => c,
-                                    Err(e) => {
-                                        eprintln!(
-                                            "[{}] invalid BinaryChunk from {}: {e}",
-                                            stc.my_id, msg.from
-                                        );
-                                        return;
-                                    }
-                                };
+                            });
 
-                                // log minimal terminal
-                                println!(
-                                    "[{}] BIN chunk from {} file_id={} {}/{} size={}",
-                                    stc.my_id,
+                            entry.received.insert(chunk.index, chunk.data.clone());
+
+                            inbox_push(
+                                &stc,
+                                format!(
+                                    "(BIN t{} from {} file_id={} chunk {}/{} size={})",
+                                    msg.tree_id,
                                     msg.from,
                                     chunk.file_id,
                                     chunk.index + 1,
                                     chunk.total_chunks,
                                     chunk.data.len()
+                                ),
+                            );
+
+                            if entry.received.len() as u32 == entry.total_chunks {
+                                inbox_push(
+                                    &stc,
+                                    format!(
+                                        "(BIN COMPLETE from {} file_id={} total_chunks={})",
+                                        msg.from, chunk.file_id, entry.total_chunks
+                                    ),
                                 );
-
-                                // log dans /stats pour voir la diffusion binaire
-                                {
-                                    let mut q = stc.inbox.lock();
-                                    q.push_back(format!(
-                                        "(BIN t{} from {} file_id={} chunk {}/{} size={})",
-                                        msg.tree_id,
-                                        msg.from,
-                                        chunk.file_id,
-                                        chunk.index + 1,
-                                        chunk.total_chunks,
-                                        chunk.data.len()
-                                    ));
-                                    if q.len() > 200 {
-                                        q.pop_front();
-                                    }
-                                }
-
-                                // mise à jour du buffer de reconstitution
-                                {
-                                    let mut buffers =
-                                        stc.binary_buffers.lock();
-                                    let entry = buffers
-                                        .entry(chunk.file_id.clone())
-                                        .or_insert(BinaryFileBuffer {
-                                            total_chunks: chunk.total_chunks,
-                                            received: HashMap::new(),
-                                        });
-                                    entry.received.insert(
-                                        chunk.index,
-                                        chunk.data.clone(),
-                                    );
-
-                                    // si on a tout reçu, on reconstitue en mémoire
-                                    if entry.received.len() as u32
-                                        == entry.total_chunks
-                                    {
-                                        let mut full = Vec::new();
-                                        for i in 0..entry.total_chunks {
-                                            if let Some(part) =
-                                                entry.received.get(&i)
-                                            {
-                                                full.extend_from_slice(part);
-                                            } else {
-                                                eprintln!(
-                                                    "[{}] manque chunk {} pour {}",
-                                                    stc.my_id,
-                                                    i,
-                                                    chunk.file_id
-                                                );
-                                            }
-                                        }
-                                        println!(
-                                            "[{}] Reconstitution complète de {} : {} octets",
-                                            stc.my_id,
-                                            chunk.file_id,
-                                            full.len()
-                                        );
-
-                                        // trace aussi dans /stats
-                                        let mut q = stc.inbox.lock();
-                                        q.push_back(format!(
-                                            "(BIN COMPLETE from {} file_id={} total_bytes={})",
-                                            msg.from,
-                                            chunk.file_id,
-                                            full.len()
-                                        ));
-                                        if q.len() > 200 {
-                                            q.pop_front();
-                                        }
-                                        // Option : buffers.remove(&chunk.file_id);
-                                    }
-                                }
-
-                                // forward aux enfants de CET arbre
-                                let bytes =
-                                    bincode::serialize(&msg).unwrap();
-                                for p in stc.children_by_tree
-                                    [msg.tree_id as usize]
-                                    .iter()
-                                {
-                                    if p.id != stc.my_id {
-                                        let _ = stc.tx_send.send((
-                                            p.clone(),
-                                            bytes.clone(),
-                                        ));
-                                    }
-                                }
                             }
                         }
+
+                        let bytes = bincode::serialize(&msg).unwrap();
+                        for peer in &stc.children_by_tree[msg.tree_id as usize] {
+                            let _ = stc.tx_send.send((peer.clone(), bytes.clone())).await;
+                        }
                     }
-                    Err(e) => eprintln!("[{}] invalid msg: {}", stc.my_id, e),
                 }
             }
         });

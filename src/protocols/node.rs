@@ -1,5 +1,5 @@
 use crate::journal::{Logger, entry::LogEntry};
-use std::collections::HashMap;
+use std::{collections::HashMap, hash::Hash, io, ptr::null};
 
 /// Type de message : Send ou Recv
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -64,6 +64,8 @@ pub struct PeerReviewNode {
     pub detection_states: HashMap<u32, DetectionState>,
     /// Challenges en attente pour les nœuds suspects
     pub pending_challenges: HashMap<u32, Vec<PendingChallenge>>,
+    /// Liste des snapchot des témoins
+    pub snapchot_list_witness: HashMap<u32, Vec<Snapchot>>
 }
 
 impl PeerReviewNode {
@@ -102,6 +104,7 @@ impl PeerReviewNode {
             exposed_nodes: Vec::new(),
             detection_states: HashMap::new(),
             pending_challenges: HashMap::new(),
+            snapchot_list_witness: HashMap::new(),
         }
     }
 
@@ -218,7 +221,7 @@ impl PeerReviewNode {
         let log_peer = self.logger.get_log(last_s_k, self.logger.s_k)?;
 
         // 4. Rejouer avec Algo 10
-        self.replay_and_verify(target_id, log_peer)?;
+        self.replay_and_verify(log_peer, target_id)?;
 
         Ok(())
     }
@@ -226,69 +229,76 @@ impl PeerReviewNode {
     /// Algorithme 10 : Replay & Verification
     pub fn replay_and_verify(
         &mut self,
-        target_id: u32,
-        log_peer: Vec<LogEntry>
+        log_peer: Vec<LogEntry>,
+        target_id: u32
     ) -> std::io::Result<()> 
     {
-        /*println!(
-            "[Nœud {}] Rejoue le journal de {} depuis snapshot {}",
-            self.node_id, target_id, state.last_snapshot
-        );
+        //Charger la dernière snapshot si elle existe
+        if self.snapchot_list_witness.get(&target_id).is_none() {
+            self.snapchot_list_witness.insert(target_id, Vec::new() as Vec<Snapchot>);
+            let snapchot = Snapchot::new(0);
+        } else {
+            let snapchot = *self
+                            .snapchot_list_witness
+                            .get(&target_id)
+                            .ok_or(io::Error::
+                                new(io::ErrorKind::NotFound,
+                                    "Le vecteur snapchot n'as pas été trouvé"))
+                            ?
+                            .last()
+                            .ok_or(io::Error::
+                                new(io::ErrorKind::NotFound,
+                                    "La snapchot n'as pas été trouvée"))
+                            ?;
+        }
+        //La machine à état rejoue l'output des logs à partir de la snapshot et des événement extérieur
+        // /!\/!\/!\ Ici, on clone simplement les données, dans les faits il faut adapter ce code à l'application afin de reproduire
+        // les logs output /!\/!\/!\ 
+        let log_state_machine = log_peer.clone();
 
-        // 1. Instance de référence de Si
-        let mut reference_node = PeerReviewNode::new(self.node_id, self.logger.clone());
+        if log_peer.len() != log_state_machine.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Le nombre de log de la state machine et ceux reçu ne correspondent pas",
+            ));
+        }
 
-        // 2. Charger le snapshot (ici simplifié : on ne stocke pas l'état applicatif → TODO)
-        // Dans un vrai système, faudrait recharger l'état applicatif associé.
-        // Pour le moment on assume que "snapshot = last_snapshot".
-
-        // 3. Rejouer toutes les entrées depuis le snapshot
-        for i in state.last_snapshot..state.logs_copy.len() {
-            let entry = &state.logs_copy[i];
-
-            println!(
-                "[Nœud {}] Replay entrée {}: {:?}",
-                self.node_id, entry.s_k, entry.log_type
-            );
-
-            // Ici tu dois "rejouer" réellement les opérations.
-            // Cela dépend de ton application.
-            //
-            // Exemple simplifié : juste recompute hash & signature
-            // et comparer avec celui enregistré.
-            //
-            // Dans un vrai PeerReview, on rejoue l'application entière.
-
-            let recomputed_hash = reference_node.logger.recompute_hash(entry)?;
-
-            if recomputed_hash != entry.hash {
-                println!(
-                    "[Nœud {}] ❌ Divergence détectée à s_k={}",
-                    self.node_id, entry.s_k
-                );
-                println!(
-                    "Attendu : {}\nRecalculé : {}",
-                    hex::encode(entry.hash),
-                    hex::encode(recomputed_hash),
-                );
-
-                // Preuve d'exposition
-                println!(
-                    "[Nœud {}] Nœud {} exposé (α_k, suffixe du journal fourni)",
-                    self.node_id, target_id
-                );
-                return Ok(());
+        // Ici on vérifie log par log l'égalité entre la state machine et les logs reçus
+        for i in 0..log_peer.len() {
+            if log_peer.get(i) != log_state_machine.get(i) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Le nombre de log de la state machine et ceux reçu ne correspondent pas",
+                )); 
             }
         }
 
-        println!(
-            "[Nœud {}] ✓ Journal de {} vérifié sans divergence",
-            self.node_id,
-            target_id
-        );
-
-        // Mise à jour du snapshot
-        state.last_snapshot = state.logs_copy.len();*/
         Ok(())
+    }
+
+    pub fn create_snapchot(&mut self, target_id: u32) {
+        //Ici doivent être sauvegardé toute les données de la machine à état dans la struct snapchot qui sera ensuite ajouté
+        //aux vec de snapshot du noeud
+        let snapchot = Snapchot::new(0);
+
+        self.snapchot_list_witness
+            .entry(target_id)
+            .or_insert_with(Vec::new)
+            .push(snapchot);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Snapchot {
+    // Ici doivent figurer tout les éléments importants (données) au bon fonctionnement de l'application 
+    // afin que le témoins puisse simuler avec sa machine à état
+    example: usize
+}
+
+impl Snapchot {
+    pub fn new(example: usize) -> Self{
+        Self{
+            example
+        }
     }
 }

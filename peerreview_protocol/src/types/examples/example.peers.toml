@@ -1,0 +1,32 @@
+# Configuration des pairs d'un noeud
+
+# Pour ajouter un nouveau nœud :
+# 1. Générer sa keypair avec ed25519-dalek
+# 2. Encoder la clé publique en base64
+# 3. Ajouter une entrée [[peers]] ici
+# 4. Distribuer ce fichier à tous les nœuds
+
+[[peers]]
+id = 42
+address = "127.0.0.1:5000"
+# Clé publique Ed25519 encodée en base64
+public_key = "jKHN8O6FXANLQZx0fGDWEAkPq8fKZXVBkXu0W/J1234="
+witnesses = [43, 44]
+
+[[peers]]
+id = 43
+address = "127.0.0.1:5000"
+public_key = "mN5P9R7HYCOTRBz2hIEXFClSr9gLaYWClYv1X/K2345="
+witnesses = [44, 45]
+
+[[peers]]
+id = 44
+address = "127.0.0.1:5000"
+public_key = "nO6Q0S8IZDPUSCz3iJFYGDmTr0hMbZXDmZw2Y/L3456="
+witnesses = [45, 42]
+
+[[peers]]
+id = 45
+address = "127.0.0.1:5000"
+public_key = "oP7R1T9JaEQVTDz4jKGZHEnUs1iNcaYEnax3Z/M4567="
+witnesses = [42, 43]

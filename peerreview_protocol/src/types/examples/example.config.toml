@@ -1,0 +1,25 @@
+# Exemple de configuration d'un noeud
+
+[node]
+id = 42
+log_file = "node42.log"
+log_max_lines = 1000
+log_min_line_size = 256
+keypair_file = "node42.key"
+state_file = "node42_state.json"
+
+[network]
+listen_address = "0.0.0.0:5042"
+peers_file = "peers.toml"
+connection_timeout_secs = 10
+ack_timeout_secs = 5
+
+[timers]
+audit_interval_secs = 30
+consistency_check_secs = 60
+evidence_transfer_secs = 120
+
+[witnesses]
+# Liste des IDs des témoins de ce nœud
+# Ces noeuds doivent être présents dans peers.toml
+list = [43, 44]

@@ -1,25 +1,19 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, io};
 
-use crate::types::{PeerConfigEntry, PeerInfo, PeerStatus};
+use crate::types::{NodeId, PeerConfig};
+use crate::types::config::PeerInfo;
 
-pub fn build_peer_map(cfg: &[PeerConfigEntry]) -> std::io::Result<HashMap<u32, PeerInfo>> {
-    let mut out = HashMap::new();
-
-    for p in cfg {
-        let addr = p.socket_addr()?;
-        let witnesses = p.witnesses.clone().unwrap_or_default();
-
-        out.insert(
+pub fn build_peer_map(cfg: &PeerConfig) -> io::Result<HashMap<NodeId, PeerInfo>> {
+    let mut m = HashMap::new();
+    for p in cfg.peers.iter() {
+        m.insert(
             p.id,
             PeerInfo {
                 id: p.id,
-                address: addr,
+                address: p.address.clone(),
                 public_key_b64: p.public_key_b64.clone(),
-                status: PeerStatus::Trusted,
-                witnesses,
             },
         );
     }
-
-    Ok(out)
+    Ok(m)
 }

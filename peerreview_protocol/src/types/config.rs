@@ -1,48 +1,61 @@
-use std::net::SocketAddr;
+use std::{fs, io, path::Path};
+
 use base64::Engine;
-
 use ed25519_dalek::VerifyingKey;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct PeersConfig {
+use super::node::NodeId;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerConfig {
     pub peers: Vec<PeerConfigEntry>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+/// Entrée de config PR (TOML)
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerConfigEntry {
-    pub id: u32,
+    pub id: NodeId,
+    pub address: String,
+
+    /// Optionnel : base64(VerifyingKey bytes)
+    pub public_key_b64: Option<String>,
+
+    /// IDs des witnesses pour ce nœud "observé"
+    #[serde(default)]
+    pub witnesses: Vec<NodeId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerInfo {
+    pub id: NodeId,
     pub address: String,
     pub public_key_b64: Option<String>,
-    pub witnesses: Option<Vec<u32>>,
+}
+
+impl PeerConfig {
+    pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
+        let s = fs::read_to_string(path)?;
+        toml::from_str(&s).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))
+    }
 }
 
 impl PeerConfigEntry {
-    pub fn socket_addr(&self) -> std::io::Result<SocketAddr> {
-        self.address.parse().map_err(|e: std::net::AddrParseError| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
-        })
-    }
-
-    /// Optionnel : construit un verifying key si public_key_b64 est fourni.
-    pub fn verifying_key(&self) -> std::io::Result<Option<VerifyingKey>> {
-        let Some(b64) = &self.public_key_b64 else { return Ok(None); };
+    /// Décodage optionnel de la clé publique (si présente)
+    pub fn verifying_key(&self) -> io::Result<Option<VerifyingKey>> {
+        let Some(b64) = &self.public_key_b64 else {
+            return Ok(None);
+        };
 
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(b64)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+            .decode(b64.as_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
-        if bytes.len() != 32 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("public_key_b64 must decode to 32 bytes, got {}", bytes.len()),
-            ));
-        }
+        let vk =
+            VerifyingKey::from_bytes(bytes.as_slice().try_into().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "bad verifying key len")
+            })?)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes[..32]);
-
-        Ok(Some(VerifyingKey::from_bytes(&arr).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
-        })?))
+        Ok(Some(vk))
     }
 }

@@ -14,12 +14,15 @@ pub struct NetworkLayer {
 
 impl NetworkLayer {
     pub fn new(bind_addr: &str) -> io::Result<Self> {
-        let addr: SocketAddr = bind_addr
-            .parse::<SocketAddr>()
-            .map_err(|e: std::net::AddrParseError| {
-                io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
-            })?;
-        Ok(Self { listener_addr: addr })
+        let addr: SocketAddr =
+            bind_addr
+                .parse::<SocketAddr>()
+                .map_err(|e: std::net::AddrParseError| {
+                    io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
+                })?;
+        Ok(Self {
+            listener_addr: addr,
+        })
     }
 
     /// Écoute les connexions entrantes et appelle un callback pour chaque message reçu.
@@ -46,10 +49,7 @@ impl NetworkLayer {
                                     cb_inner(peer_addr, msg);
                                 }
                                 Err(e) => {
-                                    eprintln!(
-                                        "[PR] error on recv from {}: {}",
-                                        peer_addr, e
-                                    );
+                                    eprintln!("[PR] error on recv from {}: {}", peer_addr, e);
                                     break;
                                 }
                             }
@@ -71,11 +71,7 @@ impl NetworkLayer {
     }
 
     /// Envoie un message PeerReviewMsg sur un TcpStream ouvert
-    pub fn send_message(
-        &self,
-        stream: &mut TcpStream,
-        msg: &PeerReviewMsg,
-    ) -> io::Result<()> {
+    pub fn send_message(&self, stream: &mut TcpStream, msg: &PeerReviewMsg) -> io::Result<()> {
         send_framed(stream, msg)
     }
 }
@@ -83,10 +79,9 @@ impl NetworkLayer {
 /// ---- helpers framing + bincode (v2) ----
 
 fn send_framed<T: Serialize>(stream: &mut TcpStream, msg: &T) -> io::Result<()> {
-    let bytes = bincode::serde::encode_to_vec(msg, bincode::config::standard())
-        .map_err(|e: bincode::error::EncodeError| {
-            io::Error::new(io::ErrorKind::InvalidData, e.to_string())
-        })?;
+    let bytes = bincode::serde::encode_to_vec(msg, bincode::config::standard()).map_err(
+        |e: bincode::error::EncodeError| io::Error::new(io::ErrorKind::InvalidData, e.to_string()),
+    )?;
 
     let len = bytes.len() as u32;
     stream.write_all(&len.to_be_bytes())?;
@@ -103,9 +98,10 @@ fn recv_framed<T: DeserializeOwned>(stream: &mut TcpStream) -> io::Result<T> {
     stream.read_exact(&mut buf)?;
 
     let (msg, _consumed): (T, usize) =
-        bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-            .map_err(|e: bincode::error::DecodeError| {
+        bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map_err(
+            |e: bincode::error::DecodeError| {
                 io::Error::new(io::ErrorKind::InvalidData, e.to_string())
-            })?;
+            },
+        )?;
     Ok(msg)
 }

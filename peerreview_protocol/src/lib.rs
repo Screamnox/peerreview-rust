@@ -1,7 +1,9 @@
 pub mod journal;
 pub mod network;
+pub mod protocols;
+pub mod runtime;
 pub mod types;
 
-// On activera `protocols` quand le groupe aura stabilisé l’audit + types.
-// pub mod protocols;
-
+// Ré-export public “propre”
+pub use runtime::PeerReviewRuntime;
+pub use types::AppEvent;

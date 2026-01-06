@@ -19,8 +19,9 @@ pub struct PeersConfig {
 impl PeersConfig {
     pub fn load(path: &str) -> io::Result<Self> {
         let s = fs::read_to_string(path)?;
-        let cfg: PeersConfig = toml::from_str(&s)
-            .map_err(|e: toml::de::Error| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let cfg: PeersConfig = toml::from_str(&s).map_err(|e: toml::de::Error| {
+            io::Error::new(io::ErrorKind::InvalidData, e.to_string())
+        })?;
         Ok(cfg)
     }
 

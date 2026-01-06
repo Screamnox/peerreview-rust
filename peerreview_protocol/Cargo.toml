@@ -7,7 +7,7 @@ edition = "2024"
 peerreview_full = []
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 
 bincode = "2"
 serde = { version = "1", features = ["derive"] }

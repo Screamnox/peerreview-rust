@@ -18,7 +18,7 @@ const HASH_INIT: [u8; 32] = [
 /// Journaliseur : écrit les entrées dans un fichier texte
 pub struct Logger {
     pub s_k: usize,
-    line_max: usize,
+    pub line_max: usize,        // TODO: Getter OR pub?
     line_current: usize,
     file: File,
     hash: [u8; 32],

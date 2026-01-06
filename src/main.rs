@@ -1,6 +1,9 @@
 mod journal;
 mod protocols;
 
+use rand::rngs::OsRng;
+use ed25519_dalek::Keypair;
+
 use journal::Logger;
 use protocols::node::PeerReviewNode;
 
@@ -27,11 +30,17 @@ fn main() -> std::io::Result<()> {
     let logger_node3 = Logger::new("node3_journal.log", 5000, 200)?;
     let logger_node4 = Logger::new("node4_journal.log", 5000, 200)?;
 
-    // Récupérer les clés publiques
-    let node1_public_key = *logger_node1.get_public_key();
-    let node2_public_key = *logger_node2.get_public_key();
-    let node3_public_key = *logger_node3.get_public_key();
-    let node4_public_key = *logger_node4.get_public_key();
+    // Génération des paires de clés pour chaque nœud
+    let keypair_node1 = Keypair::generate(&mut OsRng);
+    let keypair_node2 = Keypair::generate(&mut OsRng);
+    let keypair_node3 = Keypair::generate(&mut OsRng);
+    let keypair_node4 = Keypair::generate(&mut OsRng);
+
+    // Extraction des clés publiques
+    let node1_public_key = keypair_node1.public;
+    let node2_public_key = keypair_node2.public;
+    let node3_public_key = keypair_node3.public;
+    let node4_public_key = keypair_node4.public;
 
     // Configuration des clés publiques pour chaque nœud
     let mut peer_keys_node1 = std::collections::HashMap::new();
@@ -55,10 +64,37 @@ fn main() -> std::io::Result<()> {
     peer_keys_node4.insert(3, node3_public_key);
 
     // Création des nœuds
-    let mut node1 = PeerReviewNode::new(1, logger_node1, witnesses_map.clone(), peer_keys_node1);
-    let mut node2 = PeerReviewNode::new(2, logger_node2, witnesses_map.clone(), peer_keys_node2);
-    let mut node3 = PeerReviewNode::new(3, logger_node3, witnesses_map.clone(), peer_keys_node3);
-    let mut node4 = PeerReviewNode::new(4, logger_node4, witnesses_map.clone(), peer_keys_node4);
+    let mut node1 = PeerReviewNode::new(
+        1,
+        logger_node1,
+        keypair_node1,
+        witnesses_map.clone(),
+        peer_keys_node1,
+    );
+
+    let mut node2 = PeerReviewNode::new(
+        2,
+        logger_node2,
+        keypair_node2,
+        witnesses_map.clone(),
+        peer_keys_node2,
+    );
+
+    let mut node3 = PeerReviewNode::new(
+        3,
+        logger_node3,
+        keypair_node3,
+        witnesses_map.clone(),
+        peer_keys_node3,
+    );
+
+    let mut node4 = PeerReviewNode::new(
+        4,
+        logger_node4,
+        keypair_node4,
+        witnesses_map.clone(),
+        peer_keys_node4,
+    );
 
     println!("✓ 4 nœuds initialisés\n");
 
@@ -90,7 +126,7 @@ fn main() -> std::io::Result<()> {
         println!("  Séquences demandées: {:?}\n", challenge.seq_nums);
         
         // Nœud 1 répond au challenge
-        let logs = node1.logger.get_log(challenge.seq_nums.len())?;
+        let logs = node1.logger.get_log(0, challenge.seq_nums.len() - 1)?;
         println!("✓ Nœud 1 répond avec {} logs\n", logs.len());
         
         // === Étape 3: Vérification - Nœud 1 HONNÊTE ===
@@ -136,7 +172,7 @@ fn main() -> std::io::Result<()> {
         // Nœud 2 répond avec des logs CORROMPUS (simulation de fraude)
         println!("⚠️  SIMULATION: Nœud 2 va répondre avec des logs corrompus\n");
         
-        let mut logs = node2.logger.get_log(challenge.seq_nums.len())?;
+        let mut logs = node2.logger.get_log(0, challenge.seq_nums.len() - 1)?;
         
         // CORROMPRE la chaîne de hash du premier log
         if !logs.is_empty() {
@@ -166,7 +202,7 @@ fn main() -> std::io::Result<()> {
         witness_id: 4,  // Témoin 4 a détecté
         exposed_node_id: 2,
         evidence_type: EvidenceType::BrokenHashChain,
-        logs: node2.logger.get_log(5)?,
+        logs: node2.logger.get_log(node2.logger.s_k - 4, node2.logger.s_k)?,
         reason: "Chaîne de hash brisée détectée".to_string(),
     };
     

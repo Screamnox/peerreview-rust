@@ -211,13 +211,7 @@ impl PeerReviewNode {
 
         // Logger le challenge dans notre journal
         let challenge_msg = format!("CHALLENGE_{}: {}", challenge_type, target_id);
-        self.logger.log_send(target_id, &challenge_msg)?;
-
-        // Mettre à jour prev_hash
-        let logs = self.logger.get_log(1)?;
-        if !logs.is_empty() {
-            self.prev_hash = logs[0].hash;
-        }
+        self.logger.log_send(target_id, &challenge_msg, &mut self.keypair)?;
 
         println!(
             "[Nœud {}] Challenge déclenché avec succès pour le nœud {}",
@@ -246,7 +240,7 @@ impl PeerReviewNode {
 
         // Étape 1: j extrait [e_min, ..., e_max]
         let count = challenge.seq_max - challenge.seq_min + 1;
-        let all_logs = self.logger.get_log(count)?;
+        let all_logs = self.logger.get_log(self.logger.s_k - count + 1, self.logger.s_k)?;
 
         // Filtrer pour obtenir le segment exact [e_min, ..., e_max]
         let log_segment: Vec<LogEntry> = all_logs
@@ -312,10 +306,11 @@ impl PeerReviewNode {
         // Récupérer h_min-1 : le hash de l'entrée précédant e_min
         let hash_before_min = if challenge.seq_min > 0 {
             // Chercher l'entrée précédente
-            let prev_logs = self.logger.get_log(challenge.seq_min)?;
+            // TODO: Simplify it!
+            let prev_logs = self.logger.get_log(challenge.seq_min, challenge.seq_min)?;
             let prev_entry = prev_logs
                 .iter()
-                .find(|entry| entry.s_k == challenge.seq_min - 1);
+                .find(|entry| entry.s_k == challenge.seq_min - 1);      // TODO: seq_min - 1 OR entry.s_k ?
 
             match prev_entry {
                 Some(entry) => entry.hash,
@@ -354,13 +349,7 @@ impl PeerReviewNode {
             challenge.seq_max
         );
         self.logger
-            .log_send(challenge.challenger_id, &response_msg)?;
-
-        // Mettre à jour prev_hash
-        let logs = self.logger.get_log(1)?;
-        if !logs.is_empty() {
-            self.prev_hash = logs[0].hash;
-        }
+            .log_send(challenge.challenger_id, &response_msg, &mut self.keypair)?;
 
         Ok(AuditChallengeResponse {
             responder_id: self.node_id,
@@ -391,7 +380,7 @@ impl PeerReviewNode {
         );
 
         // Vérifier si j a déjà reçu le message m
-        let recent_logs = self.logger.get_log(100)?; // Chercher dans les 100 dernières entrées
+        let recent_logs = self.logger.get_log(self.logger.s_k - 100 + 1, self.logger.s_k)?; // Chercher dans les 100 dernières entrées     // TODO: Why 100?
 
         // Chercher une entrée RECV pour ce message
         for entry in &recent_logs {
@@ -450,7 +439,7 @@ impl PeerReviewNode {
         match ack_msg_opt {
             Some(ack_msg) => {
                 // Récupérer les informations de l'acquittement depuis le log
-                let logs = self.logger.get_log(2)?; // SEND (ack) et RECV
+                let logs = self.logger.get_log(self.logger.s_k - 2 + 1, self.logger.s_k)?; // SEND (ack) et RECV   // TODO: Why?
 
                 if logs.len() < 2 {
                     return Err(std::io::Error::new(
@@ -527,6 +516,7 @@ impl PeerReviewNode {
         }
     }
 
+    /// TODO: Why is it not evidence transfer file to do this?
     /// Signale une incompatibilité de signature au protocole Evidence
     fn report_signature_mismatch_to_evidence(&mut self, faulty_node_id: u32, reason: &str) {
         use super::evidence::EvidenceType;
@@ -536,7 +526,7 @@ impl PeerReviewNode {
         self.set_detection_state(faulty_node_id, DetectionState::Exposed);
         
         // Récupérer les logs comme preuve
-        let logs = self.logger.get_log(10).unwrap_or_default();
+        let logs = self.logger.get_log(self.logger.s_k - 10 + 1, self.logger.s_k).unwrap_or_default();     // TODO: Why 10?
         
         // Créer une preuve d'exposition
         use super::evidence::ExposureProof;

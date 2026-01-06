@@ -17,30 +17,21 @@ impl PeerReviewNode {
         message: &str,
     ) -> std::io::Result<PeerReviewMessage> {
         // Étape 1: Sauvegarder hk-1 (hash de l'entrée précédente) avant de logger
-        let prev_hash_for_msg = self.prev_hash;
+        let prev_hash_for_msg = self.logger.get_current_hash();
 
         // Étape 2: Logger l'entrée SEND - le Logger calcule automatiquement:
         //   - hk = H(hk-1 || sk || SEND || H(ck))
         //   - αk = signature de (sk || hk)
-        self.logger.log_send(receiver_id, message)?;
+        let current_sig = self.logger.log_send(receiver_id, message, &mut self.keypair)?;
 
-        // Étape 3: Récupérer les informations de l'entrée qu'on vient de créer
-        // On récupère directement depuis le Logger au lieu d'utiliser get_log()
-        let logs = self.logger.get_log(1)?;
-        let log_entry = &logs[0];
-        let current_seq = log_entry.s_k; // sk (numéro de séquence de cette entrée)
-        let current_hash = log_entry.hash; // hk (hash de cette entrée)
-        let current_sig = log_entry.sig; // αk (signature de cette entrée)
         println!("signature: {}", hex::encode(current_sig));
-        // Étape 4: Mettre à jour prev_hash pour la prochaine entrée
-        // Le hk actuel devient le hk-1 pour la prochaine entrée
-        self.prev_hash = current_hash;
 
-        // Étape 5: Créer le message SEND à envoyer sur le réseau = {sk, hk-1, αk, m}
+        // Étape 3: Créer le message SEND à envoyer sur le réseau = {sk, hk-1, αk, m}
         let send_msg = PeerReviewMessage {
             msg_type: MessageType::Send,
-            seq_num: current_seq,         // sk
-            prev_hash: prev_hash_for_msg, // hk-1 (hash de l'entrée PRÉCÉDENTE)
+            // Note: logger.s_k == last_log_entry.s_k
+            seq_num: self.logger.s_k,         // sk
+            prev_hash: prev_hash_for_msg.try_into().unwrap(), // hk-1 (hash de l'entrée PRÉCÉDENTE)
             signature: current_sig,       // αk (signature de l'entrée ACTUELLE)
             dest: receiver_id,
             payload: message.to_string(),
@@ -215,7 +206,7 @@ impl PeerReviewNode {
             .log_recv(sender_id, msg.seq_num, msg.signature, &msg.payload)?;
 
         // Récupérer l'entrée RECV
-        let logs_recv = self.logger.get_log(1)?;
+        let logs_recv = self.logger.get_log(self.logger.s_k, self.logger.s_k)?;
         let log_entry_recv = &logs_recv[0];
         println!(
             "[Nœud {}] Message RECV loggé (seq={})",
@@ -224,14 +215,11 @@ impl PeerReviewNode {
         let recv_hash = log_entry_recv.hash;
 
         // Étape 5: Créer une entrée de log SEND pour l'acquittement (cl+1 = {i})
-        self.logger.log_send(sender_id, "")?;
+        self.logger.log_send(sender_id, "", &mut self.keypair)?;
 
         // Récupérer l'entrée SEND (acquittement)
-        let logs_ack = self.logger.get_log(1)?;
-        let log_entry_ack = &logs_ack[0];
-
-        // Mettre à jour prev_hash avec le hash de l'acquittement
-        self.prev_hash = log_entry_ack.hash;
+        let logs_ack = self.logger.get_log(self.logger.s_k, self.logger.s_k)?;
+        let log_entry_ack = &logs_ack[0]; 
 
         // Étape 7: Créer le message SEND (acquittement) = {sl+1, hl, αl+1}
         let ack_msg = PeerReviewMessage {
@@ -354,11 +342,7 @@ impl PeerReviewNode {
     /// Crée un challenge d'audit pour signaler un problème
     fn create_audit_challenge(&mut self, target_node: u32, reason: &str) -> std::io::Result<()> {
         let challenge_msg = format!("CHALLENGE_AUDIT: {}", reason);
-        self.logger.log_send(target_node, &challenge_msg)?;
-
-        // Récupérer la dernière entrée pour mettre à jour prev_hash
-        let logs = self.logger.get_log(1)?;
-        self.prev_hash = logs[0].hash;
+        self.logger.log_send(target_node, &challenge_msg, &mut self.keypair)?;
 
         println!(
             "[Nœud {}] Challenge d'audit créé pour le nœud {} : {}",
@@ -369,7 +353,6 @@ impl PeerReviewNode {
 
     /// Envoie un message et attend un acquittement avec timeout
     /// Simule l'attente d'un acquittement - à implémenter avec le réseau réel
-    #[allow(dead_code)]
     pub fn send_with_acknowledgment(
         &mut self,
         receiver_id: u32,
@@ -412,11 +395,7 @@ impl PeerReviewNode {
 
         // Pas d'acquittement ou invalide - créer un challenge d'envoi
         let challenge_msg = "CHALLENGE_SEND: Timeout - pas d'acquittement";
-        self.logger.log_send(receiver_id, challenge_msg)?;
-
-        // Récupérer la dernière entrée pour mettre à jour prev_hash
-        let logs = self.logger.get_log(1)?;
-        self.prev_hash = logs[0].hash;
+        self.logger.log_send(receiver_id, challenge_msg, &mut self.keypair)?;
 
         println!(
             "[Nœud {}] Challenge d'envoi créé pour le nœud {} : Timeout - pas d'acquittement",
@@ -435,7 +414,7 @@ impl PeerReviewNode {
         self.set_detection_state(faulty_node_id, DetectionState::Exposed);
         
         // Récupérer les logs comme preuve
-        let logs = self.logger.get_log(5).unwrap_or_default();
+        let logs = self.logger.get_log(self.logger.s_k - 5 + 1, self.logger.s_k).unwrap_or_default();      // TODO: Why 5?
         
         // Créer une preuve d'exposition
         use super::evidence::ExposureProof;

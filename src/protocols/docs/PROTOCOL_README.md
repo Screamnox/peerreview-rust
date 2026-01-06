@@ -74,7 +74,7 @@ pub fn send_message(&mut self, receiver_id: u32, message: &str) -> PeerReviewMes
    - **h_k** = `H(h_{k-1} || s_k || SEND || c_k)` (hash de l'entrée)
    - **α_k** = `Ed25519_Sign(s_k || h_k)` (signature Ed25519)
    ```rust
-   self.logger.log_send(receiver_id, message)?;
+   self.logger.log_send(receiver_id, message, &mut self.keypair)?;
    ```
 
 3. **Récupérer les informations** : Lire l'entrée créée depuis le Logger
@@ -198,7 +198,7 @@ pub fn receive_message(&mut self, msg: &PeerReviewMessage, sender_id: u32)
    - **h_{l+1}** = `H(h_l || s_{l+1} || SEND || c_{l+1})`
    - **α_{l+1}** = `Ed25519_Sign(s_{l+1} || h_{l+1})`
    ```rust
-   self.logger.log_send(sender_id, "")?;
+   self.logger.log_send(sender_id, "", &mut self.keypair)?;
    let logs_ack = self.logger.get_log(1)?;
    self.prev_hash = logs_ack[0].hash;
    ```

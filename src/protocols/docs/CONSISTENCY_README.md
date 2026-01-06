@@ -93,7 +93,7 @@ pub fn respond_to_consistency_challenge(
 3. **Logger la réponse** : Enregistre qu'une réponse a été envoyée
    ```rust
    let response_msg = format!("RESPONSE_CONSISTENCY: {} entrées envoyées", logs.len());
-   self.logger.log_send(challenge.challenger_id, &response_msg)?;
+   self.logger.log_send(challenge.challenger_id, &response_msg, &mut self.keypair)?;
    ```
 
 4. **Retourner les logs** : Le vecteur de `LogEntry` est envoyé au nœud challenger
@@ -208,7 +208,7 @@ pub fn cross_check_consistency(
    ```rust
    let check_msg = format!("CROSS_CHECK: Vérification nœuds {} et {} [{}, {}]",
                            node_a_id, node_b_id, seq_start, seq_end);
-   self.logger.log_send(node_a_id, &check_msg)?;
+   self.logger.log_send(node_a_id, &check_msg, &mut self.keypair)?;
    ```
 
 2. **Mettre à jour prev_hash** : Maintient la cohérence de notre propre journal

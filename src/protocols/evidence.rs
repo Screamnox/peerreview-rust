@@ -1,7 +1,7 @@
 use crate::journal::entry::LogEntry;
 use super::node::{PeerReviewNode, DetectionState, PendingChallenge};
 use super::consistency::ConsistencyChallenge;
-use super::challenge_response::{Challenge, AuditChallenge, SendChallenge};
+use super::challenge_response::{AuditChallenge, SendChallenge};
 
 /// Structure d'une preuve d'exposition
 #[derive(Debug, Clone)]

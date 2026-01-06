@@ -89,7 +89,7 @@ impl PeerReviewNode {
             HASH_INIT
         } else {
             // Récupérer le dernier hash du logger
-            match logger.get_log(1) {
+            match logger.get_log(logger.s_k.saturating_sub(0), logger.s_k) {
                 Ok(logs) if !logs.is_empty() => logs[0].hash,
                 _ => [0u8; 32], // Fallback sur hash nul si erreur
             }

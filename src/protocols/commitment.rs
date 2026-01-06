@@ -26,7 +26,7 @@ impl PeerReviewNode {
 
         // Étape 3: Récupérer les informations de l'entrée qu'on vient de créer
         // On récupère directement depuis le Logger au lieu d'utiliser get_log()
-        let logs = self.logger.get_log(1)?;
+        let logs = self.logger.get_log(self.logger.s_k, self.logger.s_k)?;
         let log_entry = &logs[0];
         let current_seq = log_entry.s_k; // sk (numéro de séquence de cette entrée)
         let current_hash = log_entry.hash; // hk (hash de cette entrée)
@@ -215,7 +215,7 @@ impl PeerReviewNode {
             .log_recv(sender_id, msg.seq_num, msg.signature, &msg.payload)?;
 
         // Récupérer l'entrée RECV
-        let logs_recv = self.logger.get_log(1)?;
+        let logs_recv = self.logger.get_log(self.logger.s_k.saturating_sub(0), self.logger.s_k)?;
         let log_entry_recv = &logs_recv[0];
         println!(
             "[Nœud {}] Message RECV loggé (seq={})",
@@ -227,7 +227,7 @@ impl PeerReviewNode {
         self.logger.log_send(sender_id, "", &mut self.keypair)?;
 
         // Récupérer l'entrée SEND (acquittement)
-        let logs_ack = self.logger.get_log(1)?;
+        let logs_ack = self.logger.get_log(self.logger.s_k.saturating_sub(0), self.logger.s_k)?;
         let log_entry_ack = &logs_ack[0];
 
         // Mettre à jour prev_hash avec le hash de l'acquittement
@@ -357,7 +357,7 @@ impl PeerReviewNode {
         self.logger.log_send(target_node, &challenge_msg, &mut self.keypair)?;
 
         // Récupérer la dernière entrée pour mettre à jour prev_hash
-        let logs = self.logger.get_log(1)?;
+        let logs = self.logger.get_log(self.logger.s_k, self.logger.s_k)?;
         self.prev_hash = logs[0].hash;
 
         println!(
@@ -415,7 +415,7 @@ impl PeerReviewNode {
         self.logger.log_send(receiver_id, challenge_msg, &mut self.keypair)?;
 
         // Récupérer la dernière entrée pour mettre à jour prev_hash
-        let logs = self.logger.get_log(1)?;
+        let logs = self.logger.get_log(self.logger.s_k, self.logger.s_k)?;
         self.prev_hash = logs[0].hash;
 
         println!(
@@ -435,7 +435,7 @@ impl PeerReviewNode {
         self.set_detection_state(faulty_node_id, DetectionState::Exposed);
         
         // Récupérer les logs comme preuve
-        let logs = self.logger.get_log(5).unwrap_or_default();
+        let logs = self.logger.get_log(self.logger.s_k.saturating_sub(5), self.logger.s_k).unwrap_or_default();
         
         // Créer une preuve d'exposition
         use super::evidence::ExposureProof;

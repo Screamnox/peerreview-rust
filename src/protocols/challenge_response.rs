@@ -214,7 +214,7 @@ impl PeerReviewNode {
         self.logger.log_send(target_id, &challenge_msg, &mut self.keypair)?;
 
         // Mettre à jour prev_hash
-        let logs = self.logger.get_log(1)?;
+        let logs = self.logger.get_log(self.logger.s_k, self.logger.s_k)?;
         if !logs.is_empty() {
             self.prev_hash = logs[0].hash;
         }
@@ -246,7 +246,7 @@ impl PeerReviewNode {
 
         // Étape 1: j extrait [e_min, ..., e_max]
         let count = challenge.seq_max - challenge.seq_min + 1;
-        let all_logs = self.logger.get_log(count)?;
+        let all_logs = self.logger.get_log(1, count)?;
 
         // Filtrer pour obtenir le segment exact [e_min, ..., e_max]
         let log_segment: Vec<LogEntry> = all_logs
@@ -312,7 +312,7 @@ impl PeerReviewNode {
         // Récupérer h_min-1 : le hash de l'entrée précédant e_min
         let hash_before_min = if challenge.seq_min > 0 {
             // Chercher l'entrée précédente
-            let prev_logs = self.logger.get_log(challenge.seq_min)?;
+            let prev_logs = self.logger.get_log(1, challenge.seq_min)?;
             let prev_entry = prev_logs
                 .iter()
                 .find(|entry| entry.s_k == challenge.seq_min - 1);
@@ -357,7 +357,7 @@ impl PeerReviewNode {
             .log_send(challenge.challenger_id, &response_msg, &mut self.keypair)?;
 
         // Mettre à jour prev_hash
-        let logs = self.logger.get_log(1)?;
+        let logs = self.logger.get_log(self.logger.s_k, self.logger.s_k)?;
         if !logs.is_empty() {
             self.prev_hash = logs[0].hash;
         }
@@ -391,7 +391,7 @@ impl PeerReviewNode {
         );
 
         // Vérifier si j a déjà reçu le message m
-        let recent_logs = self.logger.get_log(100)?; // Chercher dans les 100 dernières entrées
+        let recent_logs = self.logger.get_log(self.logger.s_k.saturating_sub(100), self.logger.s_k)?; // Chercher dans les 100 dernières entrées
 
         // Chercher une entrée RECV pour ce message
         for entry in &recent_logs {
@@ -450,7 +450,7 @@ impl PeerReviewNode {
         match ack_msg_opt {
             Some(ack_msg) => {
                 // Récupérer les informations de l'acquittement depuis le log
-                let logs = self.logger.get_log(2)?; // SEND (ack) et RECV
+                let logs = self.logger.get_log(self.logger.s_k.saturating_sub(2), self.logger.s_k)?; // SEND (ack) et RECV
 
                 if logs.len() < 2 {
                     return Err(std::io::Error::new(
@@ -536,7 +536,7 @@ impl PeerReviewNode {
         self.set_detection_state(faulty_node_id, DetectionState::Exposed);
         
         // Récupérer les logs comme preuve
-        let logs = self.logger.get_log(10).unwrap_or_default();
+        let logs = self.logger.get_log(self.logger.s_k.saturating_sub(10), self.logger.s_k).unwrap_or_default();
         
         // Créer une preuve d'exposition
         use super::evidence::ExposureProof;

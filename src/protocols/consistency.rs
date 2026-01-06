@@ -38,7 +38,7 @@ impl PeerReviewNode {
         self.logger.log_send(observed_node_id, &challenge_msg, &mut self.keypair)?;
 
         // Mettre à jour prev_hash
-        let logs = self.logger.get_log(1)?;
+        let logs = self.logger.get_log(self.logger.s_k, self.logger.s_k)?;
         if !logs.is_empty() {
             self.prev_hash = logs[0].hash;
         }
@@ -64,7 +64,7 @@ impl PeerReviewNode {
 
         // Récupérer tous les logs demandés
         // Note: get_log(n) récupère les n derniers logs, on devrait implémenter get_logs_by_seq()
-        let all_logs = self.logger.get_log(self.logger.s_k)?;
+        let all_logs = self.logger.get_log(1, self.logger.s_k)?;
         let mut requested_logs = Vec::new();
 
         for seq in &challenge.seq_nums {
@@ -81,7 +81,7 @@ impl PeerReviewNode {
         self.logger.log_send(challenge.witness_id, &response_msg, &mut self.keypair)?;
 
         // Mettre à jour prev_hash
-        let logs = self.logger.get_log(1)?;
+        let logs = self.logger.get_log(self.logger.s_k, self.logger.s_k)?;
         if !logs.is_empty() {
             self.prev_hash = logs[0].hash;
         }
@@ -278,7 +278,7 @@ impl PeerReviewNode {
         self.set_detection_state(node_id, DetectionState::Exposed);
         
         // Récupérer les logs comme preuve
-        let logs = self.logger.get_log(10).unwrap_or_default();
+        let logs = self.logger.get_log(self.logger.s_k.saturating_sub(10), self.logger.s_k).unwrap_or_default();
         
         // Créer une preuve d'exposition
         use super::evidence::ExposureProof;

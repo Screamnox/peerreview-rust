@@ -99,7 +99,7 @@ fn main() -> std::io::Result<()> {
         println!("  Séquences demandées: {:?}\n", challenge.seq_nums);
         
         // Nœud 1 répond au challenge
-        let logs = node1.logger.get_log(challenge.seq_nums.len())?;
+        let logs = node1.logger.get_log(1, node1.logger.s_k)?;
         println!("✓ Nœud 1 répond avec {} logs\n", logs.len());
         
         // === Étape 3: Vérification - Nœud 1 HONNÊTE ===
@@ -145,7 +145,7 @@ fn main() -> std::io::Result<()> {
         // Nœud 2 répond avec des logs CORROMPUS (simulation de fraude)
         println!("⚠️  SIMULATION: Nœud 2 va répondre avec des logs corrompus\n");
         
-        let mut logs = node2.logger.get_log(challenge.seq_nums.len())?;
+        let mut logs = node2.logger.get_log(1, node2.logger.s_k)?;
         
         // CORROMPRE la chaîne de hash du premier log
         if !logs.is_empty() {
@@ -175,7 +175,7 @@ fn main() -> std::io::Result<()> {
         witness_id: 4,  // Témoin 4 a détecté
         exposed_node_id: 2,
         evidence_type: EvidenceType::BrokenHashChain,
-        logs: node2.logger.get_log(5)?,
+        logs: node2.logger.get_log(node2.logger.s_k.saturating_sub(5), node2.logger.s_k)?,
         reason: "Chaîne de hash brisée détectée".to_string(),
     };
     

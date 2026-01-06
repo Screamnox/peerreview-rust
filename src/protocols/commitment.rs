@@ -216,6 +216,7 @@ impl PeerReviewNode {
 
         // Étape 5: Créer une entrée de log SEND pour l'acquittement (cl+1 = {i})
         self.logger.log_send(sender_id, "", &mut self.keypair)?;
+        self.logger.log_send(sender_id, "", &mut self.keypair)?;
 
         // Récupérer l'entrée SEND (acquittement)
         let logs_ack = self.logger.get_log(self.logger.s_k, self.logger.s_k)?;

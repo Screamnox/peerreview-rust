@@ -219,42 +219,75 @@ impl Logger {
 
     ///Cette fonction a pour objectif de renvoyer le nombre de log demandé passé en paramètre du plus récent au plus ancien (trié par s_k)
     pub fn get_log(&mut self, s_k_start: usize, s_k_end: usize) -> std::io::Result<Vec<LogEntry>> {
+        // Si aucun log n'a été écrit, retourner un vecteur vide
+        if self.s_k == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Vérifier que la plage est valide
+        if s_k_start > s_k_end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "s_k_start doit être inférieur ou égal à s_k_end",
+            ));
+        }
+
+        if s_k_end > self.s_k {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "s_k_end dépasse le dernier log écrit",
+            ));
+        }
+
         self.file.seek(SeekFrom::Start(0))?;
         let reader = BufReader::new(&self.file);
-        let size: usize = s_k_end-s_k_start;
+        let size: usize = s_k_end - s_k_start + 1;
         let lines = reader.lines().collect::<Result<Vec<String>, _>>()?;
 
         if size > self.line_max {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "La taille demandé résultante de s_k_start et s_k_end est supérieur à la taille de stockage du log",
-                ))
+                "La taille demandée résultante de s_k_start et s_k_end est supérieur à la taille de stockage du log",
+            ))
         }
 
-        // Si aucun log n'a été écrit, retourner un vecteur vide
-        if self.line_current == 0 {
-            return Ok(Vec::new());
-        }
-
-        let mut id: usize = self.line_current - 1;
         let mut result = Vec::with_capacity(size);
-        let mut finished: bool = false;
-        let mut entry: LogEntry;
+        let mut count = 0;
+        let max_iterations = lines.len(); // Limite pour éviter boucle infinie
+        
+        // Commencer par le log le plus récent
+        let mut id: usize = self.line_current.saturating_sub(1);
 
-        while !finished {
-            entry = LogEntry::deserialize(&lines[id])?;
-            if entry.s_k <= s_k_end{
-                if entry.s_k == s_k_start {
-                    finished = true;
+        while count < max_iterations {
+            let entry = LogEntry::deserialize(&lines[id])?;
+            
+            // Si le log est dans la plage demandée, l'ajouter
+            if entry.s_k >= s_k_start && entry.s_k <= s_k_end {
+                result.push(entry.clone());
+                
+                // Si on a tous les logs demandés, arrêter
+                if result.len() >= size {
+                    break;
                 }
-                result.push(entry);
             }
+            
+            // Arrêter si on est allé trop loin dans le passé
+            if entry.s_k < s_k_start {
+                break;
+            }
+            
+            // Passer au log précédent
             if id == 0 {
-                id += lines.len() - 1;
+                id = lines.len() - 1;
             } else {
                 id -= 1;
             }
+            count += 1;
         }
+        
+        // Trier par s_k croissant
+        result.sort_by_key(|entry| entry.s_k);
+        
         Ok(result)
     }
 

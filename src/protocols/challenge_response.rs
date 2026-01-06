@@ -307,7 +307,7 @@ impl PeerReviewNode {
         let hash_before_min = if challenge.seq_min > 0 {
             // Chercher l'entrée précédente
             // TODO: Simplify it!
-            let prev_logs = self.logger.get_log(challenge.seq_min, challenge.seq_min)?;
+            let prev_logs = self.logger.get_log(challenge.seq_min, self.logger.s_k)?;
             let prev_entry = prev_logs
                 .iter()
                 .find(|entry| entry.s_k == challenge.seq_min - 1);      // TODO: seq_min - 1 OR entry.s_k ?

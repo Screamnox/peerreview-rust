@@ -24,6 +24,21 @@ fn main() -> std::io::Result<()> {
     println!("Témoin 3 : témoin = {:?}", witnesses_map.get(&3).unwrap());
     println!("Témoin 4 : témoin = {:?}\n", witnesses_map.get(&4).unwrap());
 
+    // Générer les keypairs pour chaque nœud
+    use ed25519_dalek::Keypair;
+    use rand::rngs::OsRng;
+    let mut rng = OsRng;
+    
+    let keypair1 = Keypair::generate(&mut rng);
+    let keypair2 = Keypair::generate(&mut rng);
+    let keypair3 = Keypair::generate(&mut rng);
+    let keypair4 = Keypair::generate(&mut rng);
+    
+    let node1_public_key = keypair1.public;
+    let node2_public_key = keypair2.public;
+    let node3_public_key = keypair3.public;
+    let node4_public_key = keypair4.public;
+
     // Création des loggers
     let logger_node1 = Logger::new("node1_journal.log", 5000, 200)?;
     let logger_node2 = Logger::new("node2_journal.log", 5000, 200)?;
@@ -126,7 +141,7 @@ fn main() -> std::io::Result<()> {
         println!("  Séquences demandées: {:?}\n", challenge.seq_nums);
         
         // Nœud 1 répond au challenge
-        let logs = node1.logger.get_log(0, challenge.seq_nums.len() - 1)?;
+        let logs = node1.logger.get_log(1, node1.logger.s_k)?;
         println!("✓ Nœud 1 répond avec {} logs\n", logs.len());
         
         // === Étape 3: Vérification - Nœud 1 HONNÊTE ===
@@ -172,7 +187,7 @@ fn main() -> std::io::Result<()> {
         // Nœud 2 répond avec des logs CORROMPUS (simulation de fraude)
         println!("⚠️  SIMULATION: Nœud 2 va répondre avec des logs corrompus\n");
         
-        let mut logs = node2.logger.get_log(0, challenge.seq_nums.len() - 1)?;
+        let mut logs = node2.logger.get_log(1, node2.logger.s_k)?;
         
         // CORROMPRE la chaîne de hash du premier log
         if !logs.is_empty() {

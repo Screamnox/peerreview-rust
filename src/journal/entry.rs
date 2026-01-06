@@ -13,7 +13,7 @@ pub enum LogType {
 }
 
 /// Structure d'une entrée du journal
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LogEntry {
     pub s_k: usize,        // numéro séquentiel (anciennement timestamp)
     pub log_type: LogType, // type d’opération

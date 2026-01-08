@@ -1,78 +1,39 @@
 use crate::journal::entry::LogEntry;
+use crate::types::node::Node as PeerReviewNode;
+use crate::types::{PeerReviewMsg, PeerStatus};
+use crate::types::messages::{Challenge, ChallengeKind, ChallengeResponse as MsgChallengeResponse, Authenticator, MsgLogEntry, MsgType, MsgContent};
 use std::collections::{HashMap, HashSet};
 
-use super::node::{PeerReviewMessage, PeerReviewNode};
+pub type AuditChallenge = Challenge;
+pub type SendChallenge = Challenge;
+pub type ProtocolChallenge = Challenge;
 
-/// Challenge d'audit : contient (α_j_min, α_j_max)
-/// Les signatures des entrées minimale et maximale du segment demandé
-#[derive(Debug, Clone)]
-pub struct AuditChallenge {
-    pub challenger_id: u32,           // ID du nœud i qui émet le défi
-    pub target_id: u32,               // ID du nœud j défié
-    pub sig_min: [u8; 64],            // α_j_min : signature de l'entrée minimale
-    pub sig_max: [u8; 64],            // α_j_max : signature de l'entrée maximale
-    pub seq_min: usize,               // s_min : numéro séquentiel minimal
-    pub seq_max: usize,               // s_max : numéro séquentiel maximal
-}
-
-/// Challenge d'envoi : contient (m, α_i_k)
-/// Le message non acquitté et sa signature
-#[derive(Debug, Clone)]
-pub struct SendChallenge {
-    pub challenger_id: u32,           // ID du nœud i qui émet le défi
-    pub target_id: u32,               // ID du nœud j défié
-    pub message: PeerReviewMessage,   // m : message non acquitté
-    pub signature: [u8; 64],          // α_i_k : signature du message
-}
-
-/// Type de challenge
-#[derive(Debug, Clone)]
-pub enum Challenge {
-    Audit(AuditChallenge),
-    Send(SendChallenge),
-}
-
-/// Réponse à un challenge d'audit : (e_min, ..., e_max, h_min-1)
 #[derive(Debug, Clone)]
 pub struct AuditChallengeResponse {
-    pub responder_id: u32,            // ID du nœud j qui répond
-    pub log_segment: Vec<LogEntry>,   // [e_min, ..., e_max] : segment de log
-    pub hash_before_min: [u8; 32],    // h_min-1 : hash avant le segment
+    pub responder_id: u32,
+    pub log_segment: Vec<LogEntry>,
+    pub hash_before_min: [u8; 32],
 }
 
-/// Réponse à un challenge d'envoi : acquittement (h_l-1, s_l, α_j_l)
 #[derive(Debug, Clone)]
 pub struct SendChallengeResponse {
-    pub responder_id: u32,            // ID du nœud j qui répond
-    pub hash_prev: [u8; 32],          // h_l-1 : hash précédent l'acquittement
-    pub seq_num: usize,               // s_l : numéro séquentiel de l'acquittement
-    pub signature: [u8; 64],          // α_j_l : signature de l'acquittement
-    pub acknowledgment: PeerReviewMessage, // Message d'acquittement complet
+    pub responder_id: u32,
+    pub hash_prev: [u8; 32],
+    pub seq_num: usize,
+    pub signature: [u8; 64],
+    pub acknowledgment: PeerReviewMsg,
 }
 
-/// Type de réponse
 #[derive(Debug, Clone)]
-pub enum ChallengeResponse {
+pub enum ProtocolChallengeResponse {
     Audit(AuditChallengeResponse),
     Send(SendChallengeResponse),
 }
 
-/// État de suspicion d'un nœud
-#[derive(Debug, Clone, PartialEq)]
-pub enum SuspicionState {
-    Trusted,      // Nœud de confiance (état par défaut)
-    Suspected,    // Nœud suspecté (ne répond pas aux défis)
-}
-
-/// Gestionnaire des challenges et des suspicions
 pub struct ChallengeManager {
     pub node_id: u32,
-    /// État de suspicion de chaque nœud : node_id -> SuspicionState
-    pub suspicion_state: HashMap<u32, SuspicionState>,
-    /// Témoins pour chaque nœud : node_id -> Set<witness_id>
-    /// W(j) = ensemble des témoins du nœud j
+    pub suspicion_state: HashMap<u32, PeerStatus>,
     pub witnesses: HashMap<u32, HashSet<u32>>,
-    /// Challenges en attente de réponse : target_id -> Challenge
     pub pending_challenges: HashMap<u32, Challenge>,
 }
 
@@ -110,7 +71,7 @@ impl ChallengeManager {
             self.node_id, node_id
         );
         self.suspicion_state
-            .insert(node_id, SuspicionState::Suspected);
+            .insert(node_id, PeerStatus::Suspected);
     }
 
     /// Lève la suspicion sur un nœud (réponse valide reçue)
@@ -120,14 +81,14 @@ impl ChallengeManager {
             self.node_id, node_id
         );
         self.suspicion_state
-            .insert(node_id, SuspicionState::Trusted);
+            .insert(node_id, PeerStatus::Trusted);
     }
 
     /// Vérifie l'état de suspicion d'un nœud
     pub fn is_suspected(&self, node_id: u32) -> bool {
         matches!(
             self.suspicion_state.get(&node_id),
-            Some(SuspicionState::Suspected)
+            Some(PeerStatus::Suspected)
         )
     }
 
@@ -140,7 +101,6 @@ impl ChallengeManager {
         self.pending_challenges.insert(target_id, challenge);
     }
 
-    /// Retire un challenge après réponse
     pub fn remove_pending_challenge(&mut self, target_id: u32) -> Option<Challenge> {
         self.pending_challenges.remove(&target_id)
     }
@@ -162,25 +122,19 @@ impl PeerReviewNode {
             self.node_id, target_id
         );
 
-        // Étape 1: i indique l'état suspected(j)
         challenge_manager.mark_as_suspected(target_id);
 
-        // Étape 2: i crée un challenge (audit ou envoi) pour j
-        // (le challenge est déjà créé et passé en paramètre)
-        let challenge_type = match &challenge {
-            Challenge::Audit(c) => format!(
+        let challenge_type = match &challenge.kind {
+            ChallengeKind::Audit { min_auth, max_auth } => format!(
                 "AUDIT (seq {} -> {})",
-                c.seq_min, c.seq_max
+                min_auth.seq, max_auth.seq
             ),
-            Challenge::Send(c) => format!("SEND (seq {})", c.message.seq_num),
+            ChallengeKind::Send { message, .. } => format!("SEND (msg={})", message),
         };
         println!(
             "[Nœud {}] Challenge créé: {}",
             self.node_id, challenge_type
         );
-
-        // Enregistrer le challenge en attente
-        challenge_manager.register_pending_challenge(target_id, challenge.clone());
 
         // Étape 3: envoie le challenge aux W(j)
         let witnesses = challenge_manager.get_witnesses(target_id);
@@ -227,25 +181,33 @@ impl PeerReviewNode {
     ///   - j envoie (e_min, ..., e_max, h_min-1)
     pub fn process_audit_challenge(
         &mut self,
-        challenge: &AuditChallenge,
+        challenge: &Challenge,
     ) -> std::io::Result<AuditChallengeResponse> {
+        let (min_auth, max_auth, seq_min, seq_max) = match &challenge.kind {
+            ChallengeKind::Audit { min_auth, max_auth } => {
+                (min_auth, max_auth, min_auth.seq, max_auth.seq)
+            }
+            _ => return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Challenge de type non-audit reçu pour process_audit_challenge"
+            )),
+        };
+
         println!(
             "[Nœud {}] === Algorithm 12: Traitement du challenge d'audit ===",
             self.node_id
         );
         println!(
             "[Nœud {}] Challenge d'audit reçu de {} (seq {} -> {})",
-            self.node_id, challenge.challenger_id, challenge.seq_min, challenge.seq_max
+            self.node_id, challenge.challenger, seq_min, seq_max
         );
 
-        // Étape 1: j extrait [e_min, ..., e_max]
-        let count = challenge.seq_max - challenge.seq_min + 1;
+        let count = seq_max - seq_min + 1;
         let all_logs = self.logger.get_log(self.logger.s_k - count + 1, self.logger.s_k)?;
 
-        // Filtrer pour obtenir le segment exact [e_min, ..., e_max]
         let log_segment: Vec<LogEntry> = all_logs
             .into_iter()
-            .filter(|entry| entry.s_k >= challenge.seq_min && entry.s_k <= challenge.seq_max)
+            .filter(|entry| entry.s_k >= seq_min && entry.s_k <= seq_max)
             .collect();
 
         if log_segment.is_empty() {
@@ -253,7 +215,7 @@ impl PeerReviewNode {
                 std::io::ErrorKind::NotFound,
                 format!(
                     "Segment de log [{}, {}] introuvable",
-                    challenge.seq_min, challenge.seq_max
+                    seq_min, seq_max
                 ),
             ));
         }
@@ -264,18 +226,16 @@ impl PeerReviewNode {
             log_segment.len()
         );
 
-        // Vérifier que les signatures correspondent
         let first_entry = &log_segment[0];
         let last_entry = &log_segment[log_segment.len() - 1];
 
-        if first_entry.sig != challenge.sig_min {
-            // APPEL AU PROTOCOLE EVIDENCE
+        if first_entry.sig != min_auth.sig {
             println!(
                 "[Challenge_Response] Signature e_min ne correspond pas à α_j_min"
             );
             println!("[Challenge_Response] → Appel du protocole Evidence\n");
             self.report_signature_mismatch_to_evidence(
-                challenge.target_id,
+                challenge.target,
                 "Signature e_min ne correspond pas à α_j_min dans challenge d'audit"
             );
             
@@ -285,14 +245,13 @@ impl PeerReviewNode {
             ));
         }
 
-        if last_entry.sig != challenge.sig_max {
-            // APPEL AU PROTOCOLE EVIDENCE
+        if last_entry.sig != max_auth.sig {
             println!(
                 "[Challenge_Response] Signature e_max ne correspond pas à α_j_max"
             );
             println!("[Challenge_Response] → Appel du protocole Evidence\n");
             self.report_signature_mismatch_to_evidence(
-                challenge.target_id,
+                challenge.target,
                 "Signature e_max ne correspond pas à α_j_max dans challenge d'audit"
             );
             
@@ -302,15 +261,11 @@ impl PeerReviewNode {
             ));
         }
 
-        // Étape 2: j envoie (e_min, ..., e_max, h_min-1)
-        // Récupérer h_min-1 : le hash de l'entrée précédant e_min
-        let hash_before_min = if challenge.seq_min > 0 {
-            // Chercher l'entrée précédente
-            // TODO: Simplify it!
-            let prev_logs = self.logger.get_log(challenge.seq_min, self.logger.s_k)?;
+        let hash_before_min = if seq_min > 0 {
+            let prev_logs = self.logger.get_log(seq_min, self.logger.s_k)?;
             let prev_entry = prev_logs
                 .iter()
-                .find(|entry| entry.s_k == challenge.seq_min - 1);      // TODO: seq_min - 1 OR entry.s_k ?
+                .find(|entry| entry.s_k == seq_min - 1);
 
             match prev_entry {
                 Some(entry) => entry.hash,
@@ -345,11 +300,11 @@ impl PeerReviewNode {
         let response_msg = format!(
             "RESPONSE_AUDIT: {} entrées [{}, {}]",
             log_segment.len(),
-            challenge.seq_min,
-            challenge.seq_max
+            seq_min,
+            seq_max
         );
         self.logger
-            .log_send(challenge.challenger_id, &response_msg, &mut self.keypair)?;
+            .log_send(challenge.challenger, &response_msg, &mut self.keypair)?;
 
         Ok(AuditChallengeResponse {
             responder_id: self.node_id,
@@ -368,35 +323,42 @@ impl PeerReviewNode {
     ///     * j renvoie l'acquittement à ses témoins W(j)
     pub fn process_send_challenge(
         &mut self,
-        challenge: &SendChallenge,
+        challenge: &Challenge,
     ) -> std::io::Result<SendChallengeResponse> {
+        let (message, sender_auth) = match &challenge.kind {
+            ChallengeKind::Send { message, sender_auth } => (message, sender_auth),
+            _ => return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Challenge de type non-send reçu pour process_send_challenge"
+            )),
+        };
+
         println!(
             "[Nœud {}] === Algorithm 12: Traitement du challenge d'envoi ===",
             self.node_id
         );
         println!(
-            "[Nœud {}] Challenge d'envoi reçu de {} (msg seq={})",
-            self.node_id, challenge.challenger_id, challenge.message.seq_num
+            "[Nœud {}] Challenge d'envoi reçu de {} (msg={})",
+            self.node_id, challenge.challenger, message
         );
 
         // Vérifier si j a déjà reçu le message m
-        let recent_logs = self.logger.get_log(self.logger.s_k - 100 + 1, self.logger.s_k)?; // Chercher dans les 100 dernières entrées     // TODO: Why 100?
+        let recent_logs = self.logger.get_log(self.logger.s_k - 100 + 1, self.logger.s_k)?;
 
-        // Chercher une entrée RECV pour ce message
+        let msg_seq = sender_auth.seq;
+        
         for entry in &recent_logs {
-            if entry.corr == challenge.challenger_id
-                && entry.s_k_corr == challenge.message.seq_num
+            if entry.corr == challenge.challenger
+                && entry.s_k_corr == msg_seq
             {
                 println!(
                     "[Nœud {}] Message déjà reçu (seq={}, s_k_corr={})",
                     self.node_id, entry.s_k, entry.s_k_corr
                 );
 
-                // j retrouve l'acquittement envoyé à i
-                // L'acquittement est une entrée SEND juste après la RECV
                 if let Some(ack_entry) = recent_logs.iter().find(|e| {
                     e.s_k == entry.s_k + 1
-                        && e.corr == challenge.challenger_id
+                        && e.corr == challenge.challenger
                         && e.log_type == crate::journal::entry::LogType::Send
                 }) {
                     println!(
@@ -404,42 +366,43 @@ impl PeerReviewNode {
                         self.node_id, ack_entry.s_k
                     );
 
-                    // j renvoie l'acquittement à ses témoins W(j)
-                    // (implémentation réseau à faire)
-
-                    let ack_msg = PeerReviewMessage {
-                        msg_type: super::node::MessageType::Send,
-                        seq_num: ack_entry.s_k,
-                        prev_hash: entry.hash, // h_l-1 : hash de l'entrée RECV
-                        signature: ack_entry.sig,
-                        dest: challenge.challenger_id,
-                        payload: String::new(),
+                    let ack_msg = PeerReviewMsg::Send {
+                        seq: ack_entry.s_k,
+                        prev_hash: entry.hash,
+                        sig: ack_entry.sig,
+                        dest: challenge.challenger,
+                        msg: String::new(),
                     };
 
                     return Ok(SendChallengeResponse {
                         responder_id: self.node_id,
-                        hash_prev: entry.hash,      // h_l-1
-                        seq_num: ack_entry.s_k,     // s_l
-                        signature: ack_entry.sig,   // α_j_l
+                        hash_prev: entry.hash,
+                        seq_num: ack_entry.s_k,
+                        signature: ack_entry.sig,
                         acknowledgment: ack_msg,
                     });
                 }
             }
         }
 
-        // j n'a pas encore reçu m
         println!(
-            "[Nœud {}] Message non encore reçu, acceptation du message",
+            "[Nœud {}] Message non encore reçu, création d'un PeerReviewMsg::Send pour traitement",
             self.node_id
         );
 
-        // i accepte m (cf. Réception message)
-        let ack_msg_opt = self.receive_message(&challenge.message, challenge.challenger_id)?;
+        let msg = PeerReviewMsg::Send {
+            seq: sender_auth.seq,
+            prev_hash: sender_auth.hash,
+            sig: sender_auth.sig,
+            dest: self.node_id,
+            msg: message.clone(),
+        };
+
+        let ack_msg_opt = self.receive_message(&msg, challenge.challenger)?;
 
         match ack_msg_opt {
             Some(ack_msg) => {
-                // Récupérer les informations de l'acquittement depuis le log
-                let logs = self.logger.get_log(self.logger.s_k - 2 + 1, self.logger.s_k)?; // SEND (ack) et RECV   // TODO: Why?
+                let logs = self.logger.get_log(self.logger.s_k - 2 + 1, self.logger.s_k)?;
 
                 if logs.len() < 2 {
                     return Err(std::io::Error::new(
@@ -448,7 +411,7 @@ impl PeerReviewNode {
                     ));
                 }
 
-                let ack_entry = &logs[0]; // Dernière entrée = SEND (acquittement)
+                let ack_entry = &logs[0];
                 let recv_entry = &logs[1]; // Avant-dernière = RECV
 
                 println!(
@@ -483,7 +446,7 @@ impl PeerReviewNode {
         seq_max: usize,
         sig_min: [u8; 64],
         sig_max: [u8; 64],
-    ) -> Result<AuditChallenge, String> {
+    ) -> Result<Challenge, String> {
         if seq_min >= seq_max {
             return Err(format!(
                 "Intervalle invalide: seq_min={} doit être < seq_max={}",
@@ -491,50 +454,72 @@ impl PeerReviewNode {
             ));
         }
 
-        Ok(AuditChallenge {
-            challenger_id: self.node_id,
-            target_id,
-            sig_min,
-            sig_max,
-            seq_min,
-            seq_max,
+        Ok(Challenge {
+            challenger: self.node_id,
+            target: target_id,
+            kind: ChallengeKind::Audit {
+                min_auth: Authenticator { seq: seq_min, hash: [0u8; 32], sig: sig_min },
+                max_auth: Authenticator { seq: seq_max, hash: [0u8; 32], sig: sig_max },
+            },
         })
     }
 
-    /// Crée un challenge d'envoi avec un message non acquitté
     pub fn create_send_challenge_cr(
         &self,
         target_id: u32,
-        message: PeerReviewMessage,
+        message: String,
         signature: [u8; 64],
-    ) -> SendChallenge {
-        SendChallenge {
-            challenger_id: self.node_id,
-            target_id,
-            message,
-            signature,
+    ) -> Challenge {
+        Challenge {
+            challenger: self.node_id,
+            target: target_id,
+            kind: ChallengeKind::Send {
+                message,
+                sender_auth: Authenticator { seq: 0, hash: [0u8; 32], sig: signature },
+            },
         }
     }
 
     /// TODO: Why is it not evidence transfer file to do this?
-    /// Signale une incompatibilité de signature au protocole Evidence
     fn report_signature_mismatch_to_evidence(&mut self, faulty_node_id: u32, reason: &str) {
-        use super::evidence::EvidenceType;
-        use super::node::DetectionState;
+        use crate::types::{PeerStatus as DetectionState, EvidenceType, Proof};
         
-        // Marquer le nœud comme exposé
         self.set_detection_state(faulty_node_id, DetectionState::Exposed);
         
-        // Récupérer les logs comme preuve
-        let logs = self.logger.get_log(self.logger.s_k - 10 + 1, self.logger.s_k).unwrap_or_default();     // TODO: Why 10?
+        let logs = self.logger.get_log(self.logger.s_k - 10 + 1, self.logger.s_k).unwrap_or_default();
         
-        // Créer une preuve d'exposition
-        use super::evidence::ExposureProof;
-        let _proof = ExposureProof {
-            witness_id: self.node_id,
-            exposed_node_id: faulty_node_id,
+        let authenticator = if !logs.is_empty() {
+            crate::types::Authenticator {
+                seq: logs[0].s_k,
+                hash: logs[0].hash,
+                sig: logs[0].sig,
+            }
+        } else {
+            crate::types::Authenticator {
+                seq: 0,
+                hash: [0u8; 32],
+                sig: [0u8; 64],
+            }
+        };
+
+        let log_suffix: Vec<crate::types::MsgLogEntry> = logs.iter().map(|log| crate::types::MsgLogEntry {
+            seq: log.s_k,
+            msg_type: crate::types::MsgType::Send,
+            dest: log.corr,
+            hash: log.hash,
+            sig: log.sig,
+            content: crate::types::messages::MsgContent::SendContent {
+                dest: log.corr,
+                message: log.msg.clone(),
+            },
+        }).collect();
+        
+        let _proof = Proof {
+            guilty_node: faulty_node_id,
+            accuser_node: self.node_id,
             evidence_type: EvidenceType::SignatureMismatch,
-            logs,
+            authenticator,
+            log_suffix,
             reason: reason.to_string(),
         };
         

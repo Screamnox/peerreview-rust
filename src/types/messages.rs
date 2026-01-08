@@ -117,12 +117,21 @@ pub enum ChallengeResponse {
 ///   Proof object
 /// ================
 
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+pub enum EvidenceType {
+    SignatureMismatch,
+    BrokenHashChain,
+    InvalidSignature,
+}
+
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Proof {
     pub guilty_node: NodeId,
     pub accuser_node: NodeId,
-    pub authenticator: Authenticator, // Authenticator prouvant l'état fautif
-    pub log_suffix: Vec<MsgLogEntry>, // Suffixe divergent du journal
+    pub evidence_type: EvidenceType,
+    pub authenticator: Authenticator,
+    pub log_suffix: Vec<MsgLogEntry>,
+    pub reason: String,
 }
 
 /// =======================

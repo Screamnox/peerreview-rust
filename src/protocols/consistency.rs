@@ -1,30 +1,22 @@
 use crate::journal::entry::{LogEntry, LogType};
+use crate::types::node::Node as PeerReviewNode;
+use crate::types::messages::{Challenge, ChallengeKind, Authenticator};
 use ed25519_dalek::Verifier;
 use sha2::{Digest, Sha256};
 
-use super::node::PeerReviewNode;
-
-/// Challenge de consistency envoyé par un témoin
-#[derive(Debug, Clone)]
-pub struct ConsistencyChallenge {
-    pub witness_id: u32,
-    pub target_id: u32,
-    pub seq_nums: Vec<usize>, // Numéros de séquence des authenticators stockés
-}
+pub type ConsistencyChallenge = Challenge;
 
 impl PeerReviewNode {
-    /// [TÉMOIN] Challenge automatique quand le seuil d'authenticators est atteint
-    /// Le témoin demande les logs correspondants aux authenticators stockés
     pub fn challenge_witnessed_node(
         &mut self,
         observed_node_id: u32,
-    ) -> std::io::Result<Option<ConsistencyChallenge>> {
+    ) -> std::io::Result<Option<Challenge>> {
         if !self.should_challenge(observed_node_id) {
             return Ok(None);
         }
 
         let stored_auths = self.stored_authenticators.get(&observed_node_id).unwrap();
-        let seq_nums: Vec<usize> = stored_auths.iter().map(|a| a.seq_num).collect();
+        let seq_nums: Vec<usize> = stored_auths.iter().map(|a| a.seq_num()).collect();
 
         println!(
             "[Témoin {}] Challenge du nœud {} pour {} authenticators",
@@ -33,51 +25,62 @@ impl PeerReviewNode {
             seq_nums.len()
         );
 
-        // Logger le challenge
         let challenge_msg = format!("CONSISTENCY_CHALLENGE: {} logs demandés", seq_nums.len());
         self.logger.log_send(observed_node_id, &challenge_msg, &mut self.keypair)?;
 
-        Ok(Some(ConsistencyChallenge {
-            witness_id: self.node_id,
-            target_id: observed_node_id,
-            seq_nums,
+        let min_seq = *seq_nums.iter().min().unwrap_or(&0);
+        let max_seq = *seq_nums.iter().max().unwrap_or(&0);
+
+        let min_auth = stored_auths.iter()
+            .find(|a| a.seq_num() == min_seq)
+            .map(|a| a.authenticator.clone())
+            .unwrap_or(Authenticator { seq: 0, hash: [0u8; 32], sig: [0u8; 64] });
+
+        let max_auth = stored_auths.iter()
+            .find(|a| a.seq_num() == max_seq)
+            .map(|a| a.authenticator.clone())
+            .unwrap_or(Authenticator { seq: 0, hash: [0u8; 32], sig: [0u8; 64] });
+
+        Ok(Some(Challenge {
+            challenger: self.node_id,
+            target: observed_node_id,
+            kind: ChallengeKind::Audit { min_auth, max_auth },
         }))
     }
 
-    /// [NŒUD SURVEILLÉ] Répond au challenge d'un témoin avec les logs demandés
     pub fn respond_to_challenge(
         &mut self,
-        challenge: &ConsistencyChallenge,
+        challenge: &Challenge,
     ) -> std::io::Result<Vec<LogEntry>> {
+        let (min_seq, max_seq) = match &challenge.kind {
+            ChallengeKind::Audit { min_auth, max_auth } => (min_auth.seq, max_auth.seq),
+            _ => return Ok(Vec::new()),
+        };
+
         println!(
-            "[Nœud {}] Réponse au challenge du témoin {} pour {} logs",
+            "[Nœud {}] Réponse au challenge du témoin {} pour les logs {} à {}",
             self.node_id,
-            challenge.witness_id,
-            challenge.seq_nums.len()
+            challenge.challenger,
+            min_seq,
+            max_seq
         );
 
-        // Récupérer tous les logs demandés
         let all_logs = self.logger.get_log(self.logger.s_k - self.logger.line_max + 1, self.logger.s_k)?;
-        let mut requested_logs = Vec::new();
+        let requested_logs: Vec<LogEntry> = all_logs
+            .into_iter()
+            .filter(|l| l.s_k >= min_seq && l.s_k <= max_seq)
+            .collect();
 
-        for seq in &challenge.seq_nums {
-            if let Some(log) = all_logs.iter().find(|l| l.s_k == *seq) {
-                requested_logs.push(log.clone());
-            }
-        }
-
-        // Logger la réponse
         let response_msg = format!(
             "CONSISTENCY_RESPONSE: {} logs envoyés",
             requested_logs.len()
         );
-        self.logger.log_send(challenge.witness_id, &response_msg, &mut self.keypair)?;
+        self.logger.log_send(challenge.challenger, &response_msg, &mut self.keypair)?;
 
         Ok(requested_logs)
     }
 
     /// [TÉMOIN] Vérifie la chaîne de hash et les signatures des logs reçus
-    /// Retourne true si tout est correct, false si une incohérence est détectée
     pub fn verify_logs_as_witness(
         &mut self,
         observed_node_id: u32,
@@ -90,7 +93,6 @@ impl PeerReviewNode {
             observed_node_id
         );
 
-        // Récupérer les authenticators stockés pour ce nœud
         let stored_auths = match self.stored_authenticators.get(&observed_node_id) {
             Some(auths) => auths,
             None => {
@@ -102,7 +104,6 @@ impl PeerReviewNode {
             }
         };
 
-        // Récupérer la clé publique du nœud surveillé
         let public_key = match self.peer_public_keys.get(&observed_node_id) {
             Some(key) => key,
             None => {
@@ -114,10 +115,8 @@ impl PeerReviewNode {
             }
         };
 
-        // Vérifier chaque log
         for log_entry in received_logs {
-            // Trouver l'authenticator correspondant
-            let stored_auth = match stored_auths.iter().find(|a| a.seq_num == log_entry.s_k) {
+            let stored_auth = match stored_auths.iter().find(|a| a.seq_num() == log_entry.s_k) {
                 Some(auth) => auth,
                 None => {
                     println!(
@@ -129,20 +128,18 @@ impl PeerReviewNode {
                 }
             };
 
-            // Vérifier que la signature stockée correspond à celle du log
-            if stored_auth.signature != log_entry.sig {
+            if stored_auth.signature() != log_entry.sig {
                 println!(
                     "[Témoin {}] ✗ Signature différente pour seq={}: attendu {} != reçu {}",
                     self.node_id,
                     log_entry.s_k,
-                    hex::encode(&stored_auth.signature[..8]),
+                    hex::encode(&stored_auth.signature()[..8]),
                     hex::encode(&log_entry.sig[..8])
                 );
                 self.mark_as_exposed(observed_node_id, "Signature modifiée");
                 return false;
             }
 
-            // Recalculer le hash et vérifier
             if !self.verify_log_hash(log_entry, received_logs) {
                 println!(
                     "[Témoin {}] ✗ Hash invalide pour seq={}",
@@ -152,7 +149,6 @@ impl PeerReviewNode {
                 return false;
             }
 
-            // Vérifier la signature Ed25519
             let mut signed_data = [0u8; 40];
             signed_data[..8].copy_from_slice(&log_entry.s_k.to_be_bytes());
             signed_data[8..].copy_from_slice(&log_entry.hash);
@@ -184,24 +180,19 @@ impl PeerReviewNode {
             self.node_id, observed_node_id
         );
         
-        // Nettoyer les authenticators après vérification réussie
         self.clear_authenticators(observed_node_id);
         
         true
     }
 
-    /// Recalcule et vérifie le hash d'une entrée de log
     fn verify_log_hash(&self, log_entry: &LogEntry, all_logs: &[LogEntry]) -> bool {
-        // Trouver le hash précédent (hk-1)
         let prev_hash = if log_entry.s_k == 1 {
-            // Première entrée, utiliser HASH_INIT
             [
                 0x3A, 0x92, 0x11, 0xDE, 0x77, 0xC4, 0x0B, 0xE8, 0x5F, 0xA2, 0x39, 0x6C, 0x00, 0x4D,
                 0x8B, 0x17, 0xD1, 0x20, 0xFE, 0x58, 0x93, 0xA7, 0x51, 0xCE, 0x29, 0x74, 0x66, 0x01,
                 0xB8, 0x42, 0xDA, 0x10,
             ]
         } else {
-            // Trouver l'entrée précédente
             match all_logs.iter().find(|l| l.s_k == log_entry.s_k - 1) {
                 Some(prev) => prev.hash,
                 None => {
@@ -215,7 +206,6 @@ impl PeerReviewNode {
             }
         };
 
-        // Calculer H(ck) où ck = {corr, [s_k_corr], msg}
         let mut hasher = Sha256::new();
         hasher.update(log_entry.corr.to_be_bytes());
         if log_entry.log_type == LogType::Recv {
@@ -224,7 +214,6 @@ impl PeerReviewNode {
         hasher.update(log_entry.msg.as_bytes());
         let c_k = hasher.finalize();
 
-        // Calculer hk = H(hk-1 || sk || log_type || H(ck))
         hasher = Sha256::new();
         hasher.update(prev_hash);
         hasher.update(log_entry.s_k.to_be_bytes());
@@ -235,11 +224,8 @@ impl PeerReviewNode {
         computed_hash == log_entry.hash
     }
 
-    /// Marque un nœud comme EXPOSED (fautif)
-    /// APPELLE le protocole Evidence pour propager les preuves
     fn mark_as_exposed(&mut self, node_id: u32, reason: &str) {
-        // Déterminer le type de preuve selon la raison
-        use super::evidence::EvidenceType;
+        use crate::types::EvidenceType;
         let evidence_type = if reason.contains("Signature") {
             if reason.contains("Ed25519") {
                 EvidenceType::InvalidSignature
@@ -260,21 +246,44 @@ impl PeerReviewNode {
         println!("[Consistency] Type de preuve: {:?}", evidence_type);
         println!("[Consistency] → Appel du protocole Evidence pour propager les preuves\n");
 
-        // Appeler le protocole Evidence pour gérer l'exposition et diffuser les preuves
-        use super::node::DetectionState;
+        use crate::types::{PeerStatus as DetectionState, Proof};
         self.set_detection_state(node_id, DetectionState::Exposed);
         
-        // Récupérer les logs comme preuve
         let start_seq = self.logger.s_k.saturating_sub(10).max(1);
         let logs = self.logger.get_log(start_seq, self.logger.s_k).unwrap_or_default();
         
-        // Créer une preuve d'exposition
-        use super::evidence::ExposureProof;
-        let proof = ExposureProof {
-            witness_id: self.node_id,
-            exposed_node_id: node_id,
+        let authenticator = if !logs.is_empty() {
+            crate::types::Authenticator {
+                seq: logs[0].s_k,
+                hash: logs[0].hash,
+                sig: logs[0].sig,
+            }
+        } else {
+            crate::types::Authenticator {
+                seq: 0,
+                hash: [0u8; 32],
+                sig: [0u8; 64],
+            }
+        };
+
+        let log_suffix: Vec<crate::types::MsgLogEntry> = logs.iter().map(|log| crate::types::MsgLogEntry {
+            seq: log.s_k,
+            msg_type: crate::types::MsgType::Send,
+            dest: log.corr,
+            hash: log.hash,
+            sig: log.sig,
+            content: crate::types::messages::MsgContent::SendContent {
+                dest: log.corr,
+                message: log.msg.clone(),
+            },
+        }).collect();
+        
+        let proof = Proof {
+            guilty_node: node_id,
+            accuser_node: self.node_id,
             evidence_type,
-            logs,
+            authenticator,
+            log_suffix,
             reason: reason.to_string(),
         };
         
@@ -293,13 +302,13 @@ impl PeerReviewNode {
     }
 
     /// Propage une preuve d'exposition via le protocole Evidence
-    fn propagate_exposure_proof_via_evidence(&self, proof: super::evidence::ExposureProof) {
-        let witnesses = self.get_witnesses(proof.exposed_node_id);
-
+fn propagate_exposure_proof_via_evidence(&self, proof: crate::types::Proof) {
+        let witnesses = self.get_witnesses(proof.guilty_node);
+        
         println!(
             "[Consistency → Evidence] Diffusion de la preuve aux {} témoin(s) du nœud {}",
             witnesses.len(),
-            proof.exposed_node_id
+            proof.guilty_node
         );
 
         for witness_id in witnesses {
@@ -307,18 +316,13 @@ impl PeerReviewNode {
                 "[Consistency → Evidence] → Témoin {} : Preuve d'exposition (type: {:?})",
                 witness_id, proof.evidence_type
             );
-            // Dans une vraie implémentation, envoyer via le réseau
-            // self.network.send_evidence_proof(witness_id, proof.clone());
         }
     }
 
-    /// Retourne la liste des nœuds exposés
     pub fn get_exposed_nodes(&self) -> &[u32] {
         &self.exposed_nodes
     }
 
-    /// Supprime les authenticators stockés pour un nœud après vérification réussie
-    /// Note: En cas de fraude détectée, les authenticators sont CONSERVÉS comme preuve
     pub fn clear_authenticators(&mut self, node_id: u32) {
         if let Some(auths) = self.stored_authenticators.get_mut(&node_id) {
             let count = auths.len();

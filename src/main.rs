@@ -1,11 +1,8 @@
-mod journal;
-mod protocols;
+use peerreview_rust::journal::Logger;
+use peerreview_rust::types::node::Node as PeerReviewNode;
 
 use rand::rngs::OsRng;
 use ed25519_dalek::Keypair;
-
-use journal::Logger;
-use protocols::node::PeerReviewNode;
 
 fn main() -> std::io::Result<()> {
     println!("=== Démonstration du protocole PeerReview ===\n");
@@ -79,7 +76,7 @@ fn main() -> std::io::Result<()> {
     peer_keys_node4.insert(3, node3_public_key);
 
     // Création des nœuds
-    let mut node1 = PeerReviewNode::new(
+    let mut node1 = PeerReviewNode::new_peerreview(
         1,
         logger_node1,
         keypair_node1,
@@ -87,7 +84,7 @@ fn main() -> std::io::Result<()> {
         peer_keys_node1,
     );
 
-    let mut node2 = PeerReviewNode::new(
+    let mut node2 = PeerReviewNode::new_peerreview(
         2,
         logger_node2,
         keypair_node2,
@@ -95,7 +92,7 @@ fn main() -> std::io::Result<()> {
         peer_keys_node2,
     );
 
-    let mut node3 = PeerReviewNode::new(
+    let mut node3 = PeerReviewNode::new_peerreview(
         3,
         logger_node3,
         keypair_node3,
@@ -103,7 +100,7 @@ fn main() -> std::io::Result<()> {
         peer_keys_node3,
     );
 
-    let mut node4 = PeerReviewNode::new(
+    let mut node4 = PeerReviewNode::new_peerreview(
         4,
         logger_node4,
         keypair_node4,
@@ -123,11 +120,15 @@ fn main() -> std::io::Result<()> {
         
         // Nœud 2 reçoit le message
         if let Some(_ack) = node2.receive_message(&msg, 1)? {
-            println!("✓ Message {} : Nœud 1 → Nœud 2 (seq={})", i, msg.seq_num);
+            let (seq, sig) = match &msg {
+                peerreview_rust::types::PeerReviewMsg::Send { seq, sig, .. } => (*seq, *sig),
+                _ => continue,
+            };
+            println!("✓ Message {} : Nœud 1 → Nœud 2 (seq={})", i, seq);
             
             // IMPORTANT : Nœud 2 envoie IMMÉDIATEMENT l'authenticator au témoin 3
-            println!("  [Nœud 2] → Envoi authenticator seq={} au témoin 3", msg.seq_num);
-            node3.store_authenticator(1, msg.seq_num, msg.signature);
+            println!("  [Nœud 2] → Envoi authenticator seq={} au témoin 3", seq);
+            node3.store_authenticator(1, seq, sig);
         }
     }
 
@@ -137,8 +138,13 @@ fn main() -> std::io::Result<()> {
     println!("--- Étape 2: Challenge automatique du témoin 3 ---\n");
     
     if let Some(challenge) = node3.challenge_witnessed_node(1)? {
-        println!("✓ Témoin 3 challenge le nœud 1 pour {} logs", challenge.seq_nums.len());
-        println!("  Séquences demandées: {:?}\n", challenge.seq_nums);
+        let (min_seq, max_seq) = match &challenge.kind {
+            peerreview_rust::types::messages::ChallengeKind::Audit { min_auth, max_auth } => (min_auth.seq, max_auth.seq),
+            _ => (0, 0),
+        };
+        let seq_count = if max_seq >= min_seq { max_seq - min_seq + 1 } else { 0 };
+        println!("✓ Témoin 3 challenge le nœud 1 pour {} logs", seq_count);
+        println!("  Séquences demandées: {} à {}\n", min_seq, max_seq);
         
         // Nœud 1 répond au challenge
         let logs = node1.logger.get_log(1, node1.logger.s_k)?;
@@ -167,11 +173,15 @@ fn main() -> std::io::Result<()> {
         
         // Nœud 1 reçoit le message
         if let Some(_ack) = node1.receive_message(&msg, 2)? {
-            println!("✓ Message {} : Nœud 2 → Nœud 1 (seq={})", i, msg.seq_num);
+            let (seq, sig) = match &msg {
+                peerreview_rust::types::PeerReviewMsg::Send { seq, sig, .. } => (*seq, *sig),
+                _ => continue,
+            };
+            println!("✓ Message {} : Nœud 2 → Nœud 1 (seq={})", i, seq);
             
             // Nœud 1 envoie l'authenticator au témoin 4
-            println!("  [Nœud 1] → Envoi authenticator seq={} au témoin 4", msg.seq_num);
-            node4.store_authenticator(2, msg.seq_num, msg.signature);
+            println!("  [Nœud 1] → Envoi authenticator seq={} au témoin 4", seq);
+            node4.store_authenticator(2, seq, sig);
         }
     }
 
@@ -181,8 +191,13 @@ fn main() -> std::io::Result<()> {
     println!("--- Étape 5: Challenge du témoin 4 ---\n");
     
     if let Some(challenge) = node4.challenge_witnessed_node(2)? {
-        println!("✓ Témoin 4 challenge le nœud 2 pour {} logs", challenge.seq_nums.len());
-        println!("  Séquences demandées: {:?}\n", challenge.seq_nums);
+        let (min_seq, max_seq) = match &challenge.kind {
+            peerreview_rust::types::messages::ChallengeKind::Audit { min_auth, max_auth } => (min_auth.seq, max_auth.seq),
+            _ => (0, 0),
+        };
+        let seq_count = if max_seq >= min_seq { max_seq - min_seq + 1 } else { 0 };
+        println!("✓ Témoin 4 challenge le nœud 2 pour {} logs", seq_count);
+        println!("  Séquences demandées: {} à {}\n", min_seq, max_seq);
         
         // Nœud 2 répond avec des logs CORROMPUS (simulation de fraude)
         println!("⚠️  SIMULATION: Nœud 2 va répondre avec des logs corrompus\n");
@@ -211,18 +226,47 @@ fn main() -> std::io::Result<()> {
     println!("--- Étape 7: Diffusion de la preuve à TOUS les nœuds ---\n");
     
     // Le témoin 4 diffuse la preuve d'exposition du nœud 2
-    use protocols::evidence::{ExposureProof, EvidenceType};
+    use peerreview_rust::types::{Proof, EvidenceType, Authenticator, MsgLogEntry, messages::MsgContent, MsgType};
     
-    let exposure_proof = ExposureProof {
-        witness_id: 4,  // Témoin 4 a détecté
-        exposed_node_id: 2,
+    let logs_node2 = node2.logger.get_log(node2.logger.s_k - 4, node2.logger.s_k)?;
+    
+    let authenticator = if !logs_node2.is_empty() {
+        Authenticator {
+            seq: logs_node2[0].s_k,
+            hash: logs_node2[0].hash,
+            sig: logs_node2[0].sig,
+        }
+    } else {
+        Authenticator {
+            seq: 0,
+            hash: [0u8; 32],
+            sig: [0u8; 64],
+        }
+    };
+
+    let log_suffix: Vec<MsgLogEntry> = logs_node2.iter().map(|log| MsgLogEntry {
+        seq: log.s_k,
+        msg_type: MsgType::Send,
+        dest: log.corr,
+        hash: log.hash,
+        sig: log.sig,
+        content: MsgContent::SendContent {
+            dest: log.corr,
+            message: log.msg.clone(),
+        },
+    }).collect();
+    
+    let exposure_proof = Proof {
+        guilty_node: 2,
+        accuser_node: 4,  // Témoin 4 a détecté
         evidence_type: EvidenceType::BrokenHashChain,
-        logs: node2.logger.get_log(node2.logger.s_k - 4, node2.logger.s_k)?,
+        authenticator,
+        log_suffix,
         reason: "Chaîne de hash brisée détectée".to_string(),
     };
     
     println!("📢 Témoin 4 diffuse la preuve d'exposition du nœud 2 à TOUS les nœuds");
-    println!("  Source: Témoin {}", exposure_proof.witness_id);
+    println!("  Source: Témoin {}", exposure_proof.accuser_node);
     println!("  Type: {:?}", exposure_proof.evidence_type);
     println!("  Raison: {}\n", exposure_proof.reason);
     
@@ -280,16 +324,16 @@ fn main() -> std::io::Result<()> {
 /// Chaque nœud vérifie la preuve et met à jour sa propre table de détection
 fn verify_and_update_detection_table(
     node: &mut PeerReviewNode,
-    proof: &protocols::evidence::ExposureProof,
+    proof: &peerreview_rust::types::Proof,
     node_name: &str,
 ) -> bool {
-    println!("[{}] Réception de la preuve d'exposition du nœud {}...", node_name, proof.exposed_node_id);
+    println!("[{}] Réception de la preuve d'exposition du nœud {}...", node_name, proof.guilty_node);
     
     // Vérifier que le témoin émetteur est légitime
-    let witnesses = node.get_witnesses(proof.exposed_node_id);
-    if !witnesses.contains(&proof.witness_id) {
+    let witnesses = node.get_witnesses(proof.guilty_node);
+    if !witnesses.contains(&proof.accuser_node) {
         println!("[{}] ✗ Le nœud {} n'est pas un témoin valide du nœud {}", 
-            node_name, proof.witness_id, proof.exposed_node_id);
+            node_name, proof.accuser_node, proof.guilty_node);
         println!("[{}] ✗ Preuve rejetée\n", node_name);
         return false;
     }
@@ -298,30 +342,30 @@ fn verify_and_update_detection_table(
     println!("[{}] Rejeu de la vérification...", node_name);
     
     match proof.evidence_type {
-        protocols::evidence::EvidenceType::BrokenHashChain => {
+        peerreview_rust::types::EvidenceType::BrokenHashChain => {
             use sha2::{Digest, Sha256};
-            use crate::journal::entry::LogType;
+            use peerreview_rust::journal::entry::LogType;
             
-            for (i, log) in proof.logs.iter().enumerate() {
+            for (i, log) in proof.log_suffix.iter().enumerate() {
                 if i > 0 {
-                    let prev_log = &proof.logs[i - 1];
+                    let prev_log = &proof.log_suffix[i - 1];
                     
                     // Recalculer le hash attendu
                     let mut hasher = Sha256::new();
                     hasher.update(prev_log.hash);
-                    hasher.update(log.s_k.to_be_bytes());
+                    hasher.update(log.seq.to_be_bytes());
                     hasher.update((LogType::Send as u8).to_be_bytes());
                     
                     let expected_hash: [u8; 32] = hasher.finalize().into();
                     
                     if log.hash != expected_hash {
-                        println!("[{}] ✓ Incohérence confirmée à seq={}", node_name, log.s_k);
+                        println!("[{}] ✓ Incohérence confirmée à seq={}", node_name, log.seq);
                         println!("[{}] ✓ Preuve VALIDE → Mise à jour table: Nœud {} = EXPOSED", 
-                            node_name, proof.exposed_node_id);
+                            node_name, proof.guilty_node);
                         
                         // Mettre à jour la table de détection de ce nœud
-                        use protocols::node::DetectionState;
-                        node.set_detection_state(proof.exposed_node_id, DetectionState::Exposed);
+                        use peerreview_rust::types::PeerStatus as DetectionState;
+                        node.set_detection_state(proof.guilty_node, DetectionState::Exposed);
                         return true;
                     }
                 }

@@ -1,105 +1,69 @@
 use crate::journal::entry::LogType;
+use crate::types::{MsgType, PeerReviewMsg};
+use crate::types::node::Node as PeerReviewNode;
 use std::time::Duration;
 
-use super::node::{MessageType, PeerReviewMessage, PeerReviewNode};
+type MessageType = MsgType;
 
 impl PeerReviewNode {
-    // TODO: Les fonctions de hachage et signature seront implémentées dans le Logger
-    // En attendant, on accepte tous les messages comme valides
 
     /// Algorithm 1: Envoi d'un message m de i vers j
-    /// 1. Crée une entrée SEND (ck = {j, m})
-    /// 2. Calcule hk = H(hk-1 || sk || SEND || H(ck))
-    /// 3. Envoyer le message SEND = {sk, hk-1, αk, m}
     pub fn send_message(
         &mut self,
         receiver_id: u32,
         message: &str,
-    ) -> std::io::Result<PeerReviewMessage> {
-        // Étape 1: Sauvegarder hk-1 (hash de l'entrée précédente) avant de logger
+    ) -> std::io::Result<PeerReviewMsg> {
         let prev_hash_for_msg = self.logger.get_current_hash();
 
-        // Étape 2: Logger l'entrée SEND - le Logger calcule automatiquement:
-        //   - hk = H(hk-1 || sk || SEND || H(ck))
-        //   - αk = signature de (sk || hk)
         let current_sig = self.logger.log_send(receiver_id, message, &mut self.keypair)?;
 
         println!("signature: {}", hex::encode(current_sig));
 
-        // Étape 3: Créer le message SEND à envoyer sur le réseau = {sk, hk-1, αk, m}
-        let send_msg = PeerReviewMessage {
-            msg_type: MessageType::Send,
-            // Note: logger.s_k == last_log_entry.s_k
-            seq_num: self.logger.s_k,         // sk
-            prev_hash: prev_hash_for_msg.try_into().unwrap(), // hk-1 (hash de l'entrée PRÉCÉDENTE)
-            signature: current_sig,       // αk (signature de l'entrée ACTUELLE)
+        let send_msg = PeerReviewMsg::Send {
+            seq: self.logger.s_k,
+            prev_hash: prev_hash_for_msg.try_into().unwrap(),
+            sig: current_sig,
             dest: receiver_id,
-            payload: message.to_string(),
+            msg: message.to_string(),
         };
-
-        /* println!(
-            "[Nœud {}] Message SEND créé pour le nœud {} (seq={}, prev_hash={:02x}{:02x}...)",
-            self.node_id, receiver_id, current_seq, prev_hash_for_msg[0], prev_hash_for_msg[1]
-        ); */
 
         Ok(send_msg)
     }
 
-    /// Algorithm 3: Vérification d'un message type SEND de i par j
-    /// Vérifie le hash et la signature d'un message SEND
+    /// Algorithm 3: Vérification d'un message SEND
     pub fn verify_send_message(
         &mut self,
-        msg: &PeerReviewMessage,
+        msg: &PeerReviewMsg,
         sender_id: u32,
         sender_public_key: &ed25519_dalek::PublicKey,
     ) -> bool {
         use ed25519_dalek::Verifier;
         use sha2::{Digest, Sha256};
 
-        // Vérifier le type de message
-        if msg.msg_type != MessageType::Send {
-            println!(
-                "[Nœud {}] Erreur: Type de message incorrect (attendu SEND)",
-                self.node_id
-            );
-            return false;
-        }
+        let (seq_num, prev_hash, signature, dest, message) = match msg {
+            PeerReviewMsg::Send { seq, prev_hash, sig, dest, msg } => {
+                (*seq, *prev_hash, *sig, *dest, msg.as_str())
+            }
+            _ => {
+                println!(
+                    "[Nœud {}] Erreur: Type de message incorrect (attendu Send)",
+                    self.node_id
+                );
+                return false;
+            }
+        };
 
-        // Étape 2: Récupérer hk-1, sk, αk, m
-        let prev_hash = msg.prev_hash; // hk-1
-        let seq_num = msg.seq_num; // sk
-        let signature = msg.signature; // αk
-        let message = &msg.payload; // m
-        /* println!(
-            "[Nœud {}] Vérification du message SEND (seq={}, prev_hash={:02x}{:02x}...)",
-            self.node_id, seq_num, prev_hash[0], prev_hash[1]
-        ); */
-
-        // Étape 3: Calculer ĥk = H(hk-1 || sk || SEND || H(ck))
-        // où ck = {j, m}
-
-        // D'abord calculer H(ck) où ck = {receiver_id, message}
         let mut hasher = Sha256::new();
-        hasher.update(msg.dest.to_be_bytes()); // j (destinataire du message)
-        hasher.update(message.as_bytes()); // m
+        hasher.update(dest.to_be_bytes());
+        hasher.update(message.as_bytes());
         let c_k = hasher.finalize();
-        /* println!(
-            "[Nœud {}] Calcul de H(ck) pour ck = {{ {}, {} }}",
-            self.node_id, msg.dest, message
-        ); */
 
-        // Ensuite calculer ĥk = H(hk-1 || sk || SEND || H(ck))
         hasher = Sha256::new();
-        hasher.update(prev_hash); // hk-1
-        hasher.update(seq_num.to_be_bytes()); // sk
-        hasher.update((LogType::Send as u8).to_be_bytes()); // SEND
-        hasher.update(c_k); // H(ck)
+        hasher.update(prev_hash);
+        hasher.update(seq_num.to_be_bytes());
+        hasher.update((LogType::Send as u8).to_be_bytes());
+        hasher.update(c_k);
         let h_k_computed: [u8; 32] = hasher.finalize().into();
-        /* println!(
-            "[Nœud {}] Calcul de ĥk = H(hk-1 || sk || SEND || H(ck)). ĥk = {}",
-            self.node_id,
-            hex::encode(h_k_computed)
-        ); */
 
         // Étape 4: Vérifier la signature pour obtenir hk = σ̄i(αk, p(i))
         // La signature est sur (sk || hk)
@@ -165,17 +129,25 @@ impl PeerReviewNode {
         true
     }
 
-    /// Algorithm 2: Réception d'un message m de i par j
-    /// 1. Vérifie la validité du message (Algorithm 3)
-    /// 2. Crée une entrée RECV (cl = {i, sk, m})
-    /// 3. Crée une entrée SEND pour l'acquittement (cl+1 = {i})
-    /// 4. Envoie l'acquittement
+    /// Algorithm 2: Réception d'un message
     pub fn receive_message(
         &mut self,
-        msg: &PeerReviewMessage,
+        msg: &PeerReviewMsg,
         sender_id: u32,
-    ) -> std::io::Result<Option<PeerReviewMessage>> {
-        // Récupérer la clé publique de l'envoyeur (clone pour éviter les problèmes de borrow)
+    ) -> std::io::Result<Option<PeerReviewMsg>> {
+        let (seq_num, _prev_hash, signature, _dest, payload) = match msg {
+            PeerReviewMsg::Send { seq, prev_hash, sig, dest, msg } => {
+                (*seq, *prev_hash, *sig, *dest, msg.as_str())
+            }
+            _ => {
+                println!(
+                    "[Nœud {}] Erreur: Type de message incorrect",
+                    self.node_id
+                );
+                return Ok(None);
+            }
+        };
+
         let sender_public_key = match self.peer_public_keys.get(&sender_id) {
             Some(key) => key.clone(),
             None => {
@@ -187,25 +159,18 @@ impl PeerReviewNode {
             }
         };
 
-        // Étape 2: Vérifier la validité du message
         let is_valid = self.verify_send_message(msg, sender_id, &sender_public_key);
 
         if !is_valid {
-            // Étape 9: Envoyer un challenge d'audit pour les témoins de i, W(i)
             self.create_audit_challenge(sender_id, "Message SEND invalide")?;
             return Ok(None);
         }
 
-        // Étape 3: Message valide
-        // IMPORTANT: Envoyer l'authenticator (signature) du sender aux témoins du sender
-        // C'est ça le protocole de consistency !
-        self.send_authenticator_to_witnesses(sender_id, msg.seq_num, msg.signature)?;
+        self.send_authenticator_to_witnesses(sender_id, seq_num, signature)?;
 
-        // Étape 4: Créer une entrée de log RECV (cl = {i, sk, m})
         self.logger
-            .log_recv(sender_id, msg.seq_num, msg.signature, &msg.payload)?;
+            .log_recv(sender_id, seq_num, signature, payload)?;
 
-        // Récupérer l'entrée RECV
         let logs_recv = self.logger.get_log(self.logger.s_k, self.logger.s_k)?;
         let log_entry_recv = &logs_recv[0];
         println!(
@@ -214,22 +179,17 @@ impl PeerReviewNode {
         );
         let recv_hash = log_entry_recv.hash;
 
-        // Étape 5: Créer une entrée de log SEND pour l'acquittement (cl+1 = {i})
-        self.logger.log_send(sender_id, "", &mut self.keypair)?;
         self.logger.log_send(sender_id, "", &mut self.keypair)?;
 
-        // Récupérer l'entrée SEND (acquittement)
         let logs_ack = self.logger.get_log(self.logger.s_k, self.logger.s_k)?;
-        let log_entry_ack = &logs_ack[0]; 
+        let log_entry_ack = &logs_ack[0];
 
-        // Étape 7: Créer le message SEND (acquittement) = {sl+1, hl, αl+1}
-        let ack_msg = PeerReviewMessage {
-            msg_type: MessageType::Send,
-            seq_num: log_entry_ack.s_k,
+        let ack_msg = PeerReviewMsg::Send {
+            seq: log_entry_ack.s_k,
             prev_hash: recv_hash,         // hl (hash de l'entrée RECV)
-            signature: log_entry_ack.sig, // αl+1 depuis le journal
+            sig: log_entry_ack.sig, // αl+1 depuis le journal
             dest: sender_id,
-            payload: String::new(), // Acquittement vide
+            msg: String::new(), // Acquittement vide
         };
 
         println!(
@@ -245,7 +205,7 @@ impl PeerReviewNode {
     /// L'acquittement prouve que j a bien reçu notre message en incluant le hash de son entrée RECV
     pub fn verify_recv_message(
         &mut self,
-        ack_msg: &PeerReviewMessage,
+        ack_msg: &PeerReviewMsg,
         receiver_id: u32,
         receiver_public_key: &ed25519_dalek::PublicKey,
         _original_seq_num: usize,
@@ -254,23 +214,24 @@ impl PeerReviewNode {
         use ed25519_dalek::Verifier;
         use sha2::{Digest, Sha256};
 
-        // Vérifier le type de message
-        if ack_msg.msg_type != MessageType::Send {
-            println!(
-                "[Nœud {}] Erreur: Type de message incorrect (attendu SEND pour acquittement)",
-                self.node_id
-            );
-            return false;
-        }
+        // Extraire les champs du message Send (acquittement)
+        let (ack_seq_num, recv_hash, ack_signature, _dest, _msg) = match ack_msg {
+            PeerReviewMsg::Send { seq, prev_hash, sig, dest, msg } => {
+                (*seq, *prev_hash, *sig, *dest, msg.as_str())
+            }
+            _ => {
+                println!(
+                    "[Nœud {}] Erreur: Type de message incorrect (attendu Send pour acquittement)",
+                    self.node_id
+                );
+                return false;
+            }
+        };
 
         // L'acquittement est un message SEND qui contient:
-        // - seq_num: le numéro de séquence de l'acquittement SEND  (sl+1)
+        // - seq: le numéro de séquence de l'acquittement SEND  (sl+1)
         // - prev_hash: le hash de l'entrée RECV (hl)
-        // - signature: la signature de l'acquittement SEND (αl+1)
-
-        let ack_seq_num = ack_msg.seq_num; // sl+1
-        let recv_hash = ack_msg.prev_hash; // hl (hash de l'entrée RECV)
-        let ack_signature = ack_msg.signature; // αl+1
+        // - sig: la signature de l'acquittement SEND (αl+1)
 
         // Étape 1: Vérifier la signature de l'acquittement SEND
         // L'acquittement SEND est signé sur (sl+1 || hl+1)
@@ -359,11 +320,17 @@ impl PeerReviewNode {
         receiver_id: u32,
         message: &str,
         _timeout: Duration,
-        ack_received: Option<PeerReviewMessage>,
+        ack_received: Option<PeerReviewMsg>,
     ) -> std::io::Result<bool> {
         // Envoyer le message
         let send_msg = self.send_message(receiver_id, message)?;
-        let original_seq = send_msg.seq_num;
+        let original_seq = match &send_msg {
+            PeerReviewMsg::Send { seq, .. } => *seq,
+            _ => {
+                println!("[Nœud {}] Erreur: Type de message incorrect", self.node_id);
+                return Ok(false);
+            }
+        };
 
         // Simuler l'attente du timeout
         println!("[Nœud {}] Timeout - aucun acquittement reçu", self.node_id);
@@ -408,22 +375,44 @@ impl PeerReviewNode {
 
     /// Signale une signature invalide au protocole Evidence pour propagation
     fn report_invalid_signature_to_evidence(&mut self, faulty_node_id: u32, reason: &str) {
-        use super::evidence::EvidenceType;
-        use super::node::DetectionState;
+        use crate::types::{PeerStatus as DetectionState, EvidenceType, Proof};
         
-        // Marquer le nœud comme suspect puis exposé
         self.set_detection_state(faulty_node_id, DetectionState::Exposed);
         
-        // Récupérer les logs comme preuve
-        let logs = self.logger.get_log(self.logger.s_k - 5 + 1, self.logger.s_k).unwrap_or_default();      // TODO: Why 5?
+        let logs = self.logger.get_log(self.logger.s_k - 5 + 1, self.logger.s_k).unwrap_or_default();
         
-        // Créer une preuve d'exposition
-        use super::evidence::ExposureProof;
-        let _proof = ExposureProof {
-            witness_id: self.node_id,
-            exposed_node_id: faulty_node_id,
+        let authenticator = if !logs.is_empty() {
+            crate::types::Authenticator {
+                seq: logs[0].s_k,
+                hash: logs[0].hash,
+                sig: logs[0].sig,
+            }
+        } else {
+            crate::types::Authenticator {
+                seq: 0,
+                hash: [0u8; 32],
+                sig: [0u8; 64],
+            }
+        };
+
+        let log_suffix: Vec<crate::types::MsgLogEntry> = logs.iter().map(|log| crate::types::MsgLogEntry {
+            seq: log.s_k,
+            msg_type: crate::types::MsgType::Send,
+            dest: log.corr,
+            hash: log.hash,
+            sig: log.sig,
+            content: crate::types::messages::MsgContent::SendContent {
+                dest: log.corr,
+                message: log.msg.clone(),
+            },
+        }).collect();
+        
+        let _proof = Proof {
+            guilty_node: faulty_node_id,
+            accuser_node: self.node_id,
             evidence_type: EvidenceType::InvalidSignature,
-            logs,
+            authenticator,
+            log_suffix,
             reason: reason.to_string(),
         };
         

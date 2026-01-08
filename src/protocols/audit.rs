@@ -1,6 +1,6 @@
 use std::io;
 
-use crate::{journal::entry::LogEntry, protocols::node::PeerReviewNode};
+use crate::{journal::entry::LogEntry, types::node::Node as PeerReviewNode};
 
 #[derive(Clone, Copy)]
 pub struct Snapchot {
@@ -28,7 +28,7 @@ impl PeerReviewNode {
         let auth_table = &self.stored_authenticators[&target_id];
         let alpha_k = &auth_table[auth_table.len()];
 
-        let last_s_k = alpha_k.seq_num;
+        let last_s_k = alpha_k.seq_num();
 
         // 2. Envoyer le challenge d’audit
         println!(

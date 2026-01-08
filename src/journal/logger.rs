@@ -271,11 +271,6 @@ impl Logger {
                 }
             }
             
-            // Arrêter si on est allé trop loin dans le passé
-            if entry.s_k < s_k_start {
-                break;
-            }
-            
             // Passer au log précédent
             if id == 0 {
                 id = lines.len() - 1;
@@ -284,9 +279,7 @@ impl Logger {
             }
             count += 1;
         }
-        
-        // Trier par s_k croissant
-        result.sort_by_key(|entry| entry.s_k);
+
         
         Ok(result)
     }

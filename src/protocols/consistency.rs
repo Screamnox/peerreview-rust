@@ -265,7 +265,8 @@ impl PeerReviewNode {
         self.set_detection_state(node_id, DetectionState::Exposed);
         
         // Récupérer les logs comme preuve
-        let logs = self.logger.get_log(self.logger.s_k - 10 + 1, self.logger.s_k).unwrap_or_default();         // TODO: Why 10?
+        let start_seq = self.logger.s_k.saturating_sub(10).max(1);
+        let logs = self.logger.get_log(start_seq, self.logger.s_k).unwrap_or_default();
         
         // Créer une preuve d'exposition
         use super::evidence::ExposureProof;

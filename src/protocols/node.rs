@@ -83,7 +83,7 @@ impl PeerReviewNode {
             peer_public_keys,
             witnesses_map,
             stored_authenticators: HashMap::new(),
-            challenge_threshold: 10,
+            challenge_threshold: 5,
             exposed_nodes: Vec::new(),
             detection_states: HashMap::new(),
             pending_challenges: HashMap::new(),

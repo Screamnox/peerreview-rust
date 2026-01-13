@@ -1,12 +1,22 @@
 use serde::{Deserialize, Serialize};
+use std::io;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogEntry {
     pub seq: u64,
     pub peer: u32,
     pub kind: String,
-    pub hash: [u8; 32],
-    pub sig: Vec<u8>,      // 64 bytes
+
+    /// SHA256 digest bytes
+    pub hash: Vec<u8>, // must be len=32
+
+    /// Chaining hash bytes (previous entry hash)
+    pub prev_hash: Vec<u8>, // must be len=32
+
+    /// Ed25519 signature bytes over `hash` (NOT over JSON)
+    pub sig: Vec<u8>, // must be len=64
+
+    /// Human-readable payload
     pub payload: String,
 }
 
@@ -14,40 +24,62 @@ impl LogEntry {
     pub fn new(
         seq: u64,
         peer: u32,
-        kind: impl Into<String>,
-        hash: [u8; 32],
-        sig: [u8; 64],
-        payload: impl Into<String>,
+        kind: &str,
+        hash32: [u8; 32],
+        prev_hash32: [u8; 32],
+        sig64: [u8; 64],
+        payload: String,
     ) -> Self {
         Self {
             seq,
             peer,
-            kind: kind.into(),
-            hash,
-            sig: sig.to_vec(),
-            payload: payload.into(),
+            kind: kind.to_string(),
+            hash: hash32.to_vec(),
+            prev_hash: prev_hash32.to_vec(),
+            sig: sig64.to_vec(),
+            payload,
         }
     }
 
-    pub fn to_json_line(&self) -> std::io::Result<String> {
+    pub fn to_json_line(&self) -> io::Result<String> {
         serde_json::to_string(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     }
 
-    pub fn from_json_line(line: &str) -> std::io::Result<Self> {
-        serde_json::from_str(line)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+    pub fn from_json_line(s: &str) -> io::Result<Self> {
+        serde_json::from_str(s)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     }
 
-    pub fn hash_bytes(&self) -> &[u8; 32] {
-        &self.hash
+    pub fn hash_bytes_32(&self) -> io::Result<[u8; 32]> {
+        if self.hash.len() != 32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "hash must be 32 bytes",
+            ));
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&self.hash);
+        Ok(out)
     }
 
-    pub fn sig_bytes_64(&self) -> std::io::Result<[u8; 64]> {
+    pub fn prev_hash_bytes_32(&self) -> io::Result<[u8; 32]> {
+        if self.prev_hash.len() != 32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "prev_hash must be 32 bytes",
+            ));
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&self.prev_hash);
+        Ok(out)
+    }
+
+    pub fn sig_bytes_64(&self) -> io::Result<[u8; 64]> {
         if self.sig.len() != 64 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("sig len {} != 64", self.sig.len()),
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sig must be 64 bytes",
             ));
         }
         let mut out = [0u8; 64];

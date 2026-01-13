@@ -1,19 +1,15 @@
 nodes:
-  - id: "node1"
+  - id: 1
+    name: "node1"
     app_addr: "node1:7001"
     pr_addr: "node1:7002"
+    http_addr: "node1:8001"
 
-  - id: "node2"
+  - id: 2
+    name: "node2"
     app_addr: "node2:7001"
     pr_addr: "node2:7002"
-
-  - id: "node3"
-    app_addr: "node3:7001"
-    pr_addr: "node3:7002"
-
-  - id: "node4"
-    app_addr: "node4:7001"
-    pr_addr: "node4:7002"
+    http_addr: "node2:8001"
 
 fanout: 2
 num_trees: 3

@@ -1,13 +1,64 @@
 nodes:
-  - { id: "node1", addr: "node1:7001" }
-  - { id: "node2", addr: "node2:7001" }
-  - { id: "node3", addr: "node3:7001" }
-  - { id: "node4", addr: "node4:7001" }
-  - { id: "node5", addr: "node5:7001" }
-  - { id: "node6", addr: "node6:7001" }
-  - { id: "node7", addr: "node7:7001" }
-  - { id: "node8", addr: "node8:7001" }
-  - { id: "node9", addr: "node9:7001" }
-  - { id: "node10", addr: "node10:7001" }
-fanout: 3
+  - id: 1
+    name: node1
+    app_addr: "172.30.0.11:7001"
+    pr_addr: "172.30.0.11:7002"
+    http_addr: "0.0.0.0:8081"
+
+  - id: 2
+    name: node2
+    app_addr: "172.30.0.12:7001"
+    pr_addr: "172.30.0.12:7002"
+    http_addr: "0.0.0.0:8082"
+
+  - id: 3
+    name: node3
+    app_addr: "172.30.0.13:7001"
+    pr_addr: "172.30.0.13:7002"
+    http_addr: "0.0.0.0:8083"
+
+  - id: 4
+    name: node4
+    app_addr: "172.30.0.14:7001"
+    pr_addr: "172.30.0.14:7002"
+    http_addr: "0.0.0.0:8084"
+
+  - id: 5
+    name: node5
+    app_addr: "172.30.0.15:7001"
+    pr_addr: "172.30.0.15:7002"
+    http_addr: "0.0.0.0:8085"
+
+  - id: 6
+    name: node6
+    app_addr: "172.30.0.16:7001"
+    pr_addr: "172.30.0.16:7002"
+    http_addr: "0.0.0.0:8086"
+
+  - id: 7
+    name: node7
+    app_addr: "172.30.0.17:7001"
+    pr_addr: "172.30.0.17:7002"
+    http_addr: "0.0.0.0:8087"
+
+  - id: 8
+    name: node8
+    app_addr: "172.30.0.18:7001"
+    pr_addr: "172.30.0.18:7002"
+    http_addr: "0.0.0.0:8088"
+
+  - id: 9
+    name: node9
+    app_addr: "172.30.0.19:7001"
+    pr_addr: "172.30.0.19:7002"
+    http_addr: "0.0.0.0:8089"
+
+  - id: 10
+    name: node10
+    app_addr: "172.30.0.20:7001"
+    pr_addr: "172.30.0.20:7002"
+    http_addr: "0.0.0.0:8090"
+
+fanout: 2
+
 num_trees: 3

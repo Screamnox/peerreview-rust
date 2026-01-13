@@ -1,5 +1,15 @@
-// apps/gossip_node/src/main.rs
+use std::{
+    collections::{HashSet, VecDeque},
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
+use anyhow::{Context, Result};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -7,611 +17,588 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-
-use common_proto::{BinaryChunk, Msg, MsgKind};
-
+use clap::Parser;
+use common_proto::{Msg, MsgKind};
+use ed25519_dalek::SigningKey;
 use peerreview_protocol::{
-    journal::Logger as PrLogger, network::layer::NetworkLayer as PrNetwork, types::PeerReviewMsg,
+    journal::Logger as PrLogger,
+    types::config::{ClusterConfig, ClusterNode},
 };
-
-use rand::RngCore;
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashSet, VecDeque},
-    net::SocketAddr,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
-};
-
+use rand::{seq::SliceRandom, RngCore};
+use sha2::{Digest, Sha256};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::mpsc,
-    time::{sleep, Duration},
+    net::{TcpListener, TcpStream, UdpSocket},
+    sync::Mutex,
+    task::JoinHandle,
 };
 
+/// ================================
+/// CLI
+/// ================================
+#[derive(Parser, Debug, Clone)]
+#[command(author, version, about)]
+struct Args {
+    /// Nom du noeud (ex: node1, node2...). On matche sur cluster.nodes[*].name en priorité.
+    #[arg(long)]
+    name: String,
+
+    /// Fichier YAML cluster (docker/cluster.yaml)
+    #[arg(long, default_value = "docker/cluster.yaml")]
+    cluster: PathBuf,
+
+    /// Répertoire pour logs peerreview
+    #[arg(long, default_value = "peerreview_logs")]
+    log_dir: PathBuf,
+
+    /// Activer endpoints HTTP
+    #[arg(long, default_value_t = true)]
+    http: bool,
+}
+
+/// ================================
+/// Runtime data
+/// ================================
+#[derive(Clone)]
+struct Peer {
+    id: u32,
+    name: String,
+    app_addr: SocketAddr,
+    pr_addr: SocketAddr,
+}
+
+struct NodeCfg {
+    my_id: u32,
+    my_name: String,
+    app_addr: SocketAddr,
+    pr_addr: SocketAddr,
+    http_addr: Option<SocketAddr>,
+    peers: Vec<Peer>,
+    fanout: usize,
+    num_trees: u8,
+}
+
+#[derive(Default)]
+struct AppStats {
+    recv_total: u64,
+    deliver_total: u64,
+    hb_total: u64,
+    publish_text_total: u64,
+    publish_bin_total: u64,
+    unique_msg_ids: usize,
+}
+
+struct AppState {
+    cfg: NodeCfg,
+    udp: Arc<UdpSocket>,
+    stats: Mutex<AppStats>,
+    seen: Mutex<HashSet<String>>,
+    last_events: Mutex<VecDeque<String>>,
+    pr_logger: Mutex<PrLogger>,
+    hb_counter: AtomicU64,
+}
+
+#[derive(serde::Serialize)]
+struct StatsOut {
+    me: String,
+    recv_total: u64,
+    deliver_total: u64,
+    hb_total: u64,
+    publish_text_total: u64,
+    publish_bin_total: u64,
+    unique_msg_ids: usize,
+    last_events: Vec<String>,
+}
+
+/// ================================
+/// Helpers
+/// ================================
 fn now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or(Duration::from_secs(0))
         .as_millis() as u64
 }
 
-// ----------------------------
-// Config structures (YAML)
-// ----------------------------
-#[derive(Debug, Clone, Deserialize)]
-struct NodeCfg {
-    id: String,
-    listen_addr: String,
-    heartbeat_ms: u64,
-    gossip_ms: u64,
-    anti_entropy_ms: u64,
-    http_api: u16,
+/// Génère une SigningKey déterministe depuis le nom (sha256(name) -> 32 bytes)
+fn signing_key_from_node_name(name: &str) -> SigningKey {
+    let mut h = Sha256::new();
+    h.update(name.as_bytes());
+    let digest = h.finalize();
+    let seed: [u8; 32] = digest.as_slice().try_into().expect("sha256 len");
+    SigningKey::from_bytes(&seed)
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct ClusterCfg {
-    nodes: Vec<PeerCfg>,
-    fanout: usize,
-    num_trees: usize,
-}
+/// Hash stable d’un Msg (pour journaliser)
+fn hash_msg_32(m: &Msg) -> [u8; 32] {
+    let mut h = Sha256::new();
 
-#[derive(Debug, Clone, Deserialize)]
-struct PeerCfg {
-    id: String,
-    addr: String,
-}
+    // id, from : String
+    h.update(m.id.as_bytes());
+    h.update(b"|");
+    h.update(m.from.as_bytes());
+    h.update(b"|");
 
-// Peer used internally by gossip_node
-#[derive(Debug, Clone)]
-struct Peer {
-    id: String,
-    addr: String,
-}
-
-// ----------------------------
-// HTTP payloads
-// ----------------------------
-#[derive(Debug, Clone, Deserialize)]
-struct PublishReq {
-    payload: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct PublishBinaryDemoReq {
-    file_id: String,
-    total_size: usize,
-    chunk_size: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct StatsResp {
-    node_id: String,
-    known_count: usize,
-    last_msgs: Vec<String>,
-    trees: usize,
-    pr_rx_count: usize,
-    pr_tx_count: usize,
-}
-
-// ----------------------------
-// Shared node state
-// ----------------------------
-#[derive(Clone)]
-struct AppState {
-    node_id: String,
-    known_msgs: Arc<Mutex<HashSet<(u32, String)>>>,
-    inbox: Arc<Mutex<VecDeque<String>>>,
-    children_by_tree: Arc<Vec<Vec<Peer>>>,
-    tx: mpsc::Sender<(Peer, Vec<u8>)>,
-
-    // Internal APP<->PR within node
-    pr_to_app_tx: mpsc::Sender<String>,
-    app_to_pr_tx: mpsc::Sender<String>,
-
-    pr_rx_count: Arc<Mutex<u64>>,
-    pr_tx_count: Arc<Mutex<u64>>,
-}
-
-// Keep inbox size bounded
-fn push_inbox(inbox: &mut VecDeque<String>, msg: String) {
-    inbox.push_front(msg);
-    if inbox.len() > 64 {
-        let keep = 64usize;
-        let drain_count = inbox.len().saturating_sub(keep);
-        if drain_count > 0 {
-            for _ in 0..drain_count {
-                inbox.pop_back();
-            }
+    // kind : bincode stable
+    if let Ok(kb) = bincode::serialize(&m.kind) {
+        h.update(&kb);
+    } else {
+        match m.kind {
+            MsgKind::Heartbeat { .. } => h.update(b"Heartbeat"),
+            MsgKind::PublishText => h.update(b"PublishText"),
+            MsgKind::PublishBinaryChunk => h.update(b"PublishBinaryChunk"),
         }
     }
+
+    h.update(b"|");
+    h.update(&m.payload);
+    h.update(b"|");
+    h.update(m.ts_ms.to_be_bytes());
+    h.update([m.tree_id]);
+
+    let out = h.finalize();
+    out.as_slice().try_into().expect("sha256 len")
 }
 
-// deterministic permutation orders for multi-tree
-fn make_orders(v: Vec<Peer>, num_trees: usize) -> Vec<Vec<Peer>> {
-    let mut out = Vec::with_capacity(num_trees);
-    for t in 0..num_trees {
-        let mut vv = v.clone();
-        let len = vv.len().max(1);
-        let rot = t % len;
-        vv.rotate_left(rot);
-        if vv.len() >= 2 {
-            let last = vv.len() - 1;
-            vv.swap(0, last);
-        }
-        out.push(vv);
+async fn push_event(state: &Arc<AppState>, s: impl Into<String>) {
+    let mut ev = state.last_events.lock().await;
+    if ev.len() >= 200 {
+        ev.pop_front();
     }
-    out
+    ev.push_back(s.into());
 }
 
-fn kary_children(order: &[Peer], me: &str, fanout: usize) -> Vec<Peer> {
-    let idx = order.iter().position(|p| p.id == me);
-    let Some(i) = idx else { return vec![] };
-    let mut out = vec![];
-    for k in 0..fanout {
-        let child_i = i * fanout + 1 + k;
-        if child_i < order.len() {
-            out.push(order[child_i].clone());
-        }
-    }
-    out
-}
+/// ================================
+/// Cluster parsing
+/// ================================
+fn parse_cluster(args: &Args) -> Result<NodeCfg> {
+    let cluster =
+        ClusterConfig::from_yaml_file(&args.cluster).context("ClusterConfig::from_yaml_file")?;
 
-// ----------------------------
-// HTTP handlers
-// ----------------------------
-async fn get_stats(State(st): State<AppState>) -> impl IntoResponse {
-    let known_count = st.known_msgs.lock().unwrap().len();
-    let last_msgs = st
-        .inbox
-        .lock()
-        .unwrap()
+    // IMPORTANT: chez toi, fanout/num_trees sont des usize (pas Option)
+    let fanout = cluster.fanout as usize;
+    let num_trees = cluster.num_trees as u8;
+
+    let me: &ClusterNode = cluster
+        .nodes
         .iter()
-        .take(12)
-        .cloned()
-        .collect::<Vec<_>>();
+        .find(|n| n.name == args.name)
+        .or_else(|| {
+            if let Ok(id) = args.name.parse::<u32>() {
+                cluster.nodes.iter().find(|n| n.id == id)
+            } else {
+                None
+            }
+        })
+        .with_context(|| format!("node '{}' not found in cluster config", args.name))?;
 
-    let pr_rx = *st.pr_rx_count.lock().unwrap();
-    let pr_tx = *st.pr_tx_count.lock().unwrap();
+    let app_addr: SocketAddr = me
+        .app_addr
+        .parse()
+        .with_context(|| format!("bad app_addr for {}: {}", me.name, me.app_addr))?;
 
-    Json(StatsResp {
-        node_id: st.node_id.clone(),
-        known_count,
-        last_msgs,
-        trees: st.children_by_tree.len(),
-        pr_rx_count: pr_rx as usize,
-        pr_tx_count: pr_tx as usize,
+    let pr_addr: SocketAddr = me
+        .pr_addr
+        .parse()
+        .with_context(|| format!("bad pr_addr for {}: {}", me.name, me.pr_addr))?;
+
+    let http_addr: Option<SocketAddr> = me.http_addr.as_ref().and_then(|s| s.parse().ok());
+
+    let mut peers = Vec::new();
+    for p in &cluster.nodes {
+        if p.id == me.id {
+            continue;
+        }
+        let p_app: SocketAddr = p
+            .app_addr
+            .parse()
+            .with_context(|| format!("bad app_addr for {}: {}", p.name, p.app_addr))?;
+
+        let p_pr: SocketAddr = p
+            .pr_addr
+            .parse()
+            .with_context(|| format!("bad pr_addr for {}: {}", p.name, p.pr_addr))?;
+
+        peers.push(Peer {
+            id: p.id,
+            name: p.name.clone(),
+            app_addr: p_app,
+            pr_addr: p_pr,
+        });
+    }
+
+    Ok(NodeCfg {
+        my_id: me.id,
+        my_name: me.name.clone(),
+        app_addr,
+        pr_addr,
+        http_addr,
+        peers,
+        fanout,
+        num_trees,
     })
 }
 
-async fn post_publish(
-    State(st): State<AppState>,
-    Json(req): Json<PublishReq>,
-) -> impl IntoResponse {
-    let payload = req.payload;
-    let num_trees = st.children_by_tree.len();
+/// ================================
+/// UDP listener
+/// ================================
+async fn udp_listener_task(state: Arc<AppState>) -> Result<()> {
+    let mut buf = vec![0u8; 64 * 1024];
 
-    for t in 0..num_trees {
-        let msg = Msg {
-            id: format!("{}-{}-{}", st.node_id, now_ms(), t),
-            from: st.node_id.clone(),
-            tree_id: t as u8,
-            kind: MsgKind::PublishText,
-            payload: payload.clone().into_bytes(),
-            ts_ms: now_ms(),
-        };
+    loop {
+        let (n, src) = state.udp.recv_from(&mut buf).await?;
+        let bytes = &buf[..n];
 
-        let key = (msg.tree_id as u32, msg.id.clone());
-        st.known_msgs.lock().unwrap().insert(key);
-
-        {
-            let mut inbox = st.inbox.lock().unwrap();
-            push_inbox(
-                &mut inbox,
-                format!("(t{} from {}) {}", t, msg.from, payload),
-            );
-        }
-
-        let bytes = bincode::serialize(&msg).unwrap(); // APP = bincode v1
-        for peer in &st.children_by_tree[t] {
-            let _ = st.tx.send((peer.clone(), bytes.clone())).await;
-        }
-    }
-
-    (StatusCode::OK, "ok")
-}
-
-async fn post_publish_binary_demo(
-    State(st): State<AppState>,
-    Json(req): Json<PublishBinaryDemoReq>,
-) -> impl IntoResponse {
-    let file_id = req.file_id;
-    let total_size = req.total_size;
-    let chunk_size = req.chunk_size.max(1);
-
-    let mut buf = vec![0u8; total_size];
-    rand::thread_rng().fill_bytes(&mut buf);
-
-    let total_chunks = (total_size + chunk_size - 1) / chunk_size;
-    let num_trees = st.children_by_tree.len();
-
-    for i in 0..total_chunks {
-        let start = i * chunk_size;
-        let end = (start + chunk_size).min(total_size);
-        let data = buf[start..end].to_vec();
-
-        let chunk = BinaryChunk {
-            file_id: file_id.clone(),
-            index: i as u32,
-            total_chunks: total_chunks as u32,
-            data,
-        };
-
-        let payload = bincode::serialize(&chunk).unwrap(); // v1
-
-        for t in 0..num_trees {
-            let msg = Msg {
-                id: format!("{}-{}-{}-{}", st.node_id, now_ms(), t, i),
-                from: st.node_id.clone(),
-                tree_id: t as u8,
-                kind: MsgKind::PublishBinaryChunk,
-                payload: payload.clone(),
-                ts_ms: now_ms(),
-            };
-
-            let key = (msg.tree_id as u32, msg.id.clone());
-            st.known_msgs.lock().unwrap().insert(key);
+        if let Ok(m) = bincode::deserialize::<Msg>(bytes) {
+            let mid = m.id.clone();
 
             {
-                let mut inbox = st.inbox.lock().unwrap();
-                push_inbox(
-                    &mut inbox,
-                    format!(
-                        "(local BIN t{} {} chunk {}/{} size={})",
-                        t,
-                        file_id,
-                        i + 1,
-                        total_chunks,
-                        end - start
-                    ),
-                );
+                let mut st = state.stats.lock().await;
+                st.recv_total += 1;
+                match m.kind {
+                    MsgKind::Heartbeat { .. } => st.hb_total += 1,
+                    MsgKind::PublishText => st.publish_text_total += 1,
+                    MsgKind::PublishBinaryChunk => st.publish_bin_total += 1,
+                }
             }
 
-            let bytes = bincode::serialize(&msg).unwrap();
-            for peer in &st.children_by_tree[t] {
-                let _ = st.tx.send((peer.clone(), bytes.clone())).await;
+            // Logger::log_app chez toi prend 5 args (kind, peer, msg_id:String, hash32, ts_ms)
+            {
+                let hash32 = hash_msg_32(&m);
+                let ts_ms = m.ts_ms;
+                let mut lg = state.pr_logger.lock().await;
+                let _ = lg.log_app("RECV", Some(src.port() as u32), mid.clone(), hash32, ts_ms);
             }
+
+            push_event(&state, format!("[UDP] from={src} id={} kind={:?}", m.id, m.kind)).await;
+
+            handle_incoming_msg(&state, m).await?;
+        } else {
+            push_event(&state, format!("[UDP] invalid msg from={src} n={n}")).await;
         }
     }
-
-    (StatusCode::OK, "ok")
 }
 
-// ----------------------------
-// Main
-// ----------------------------
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("usage: gossip_node <node_yaml> <cluster_yaml>");
-        std::process::exit(1);
-    }
-
-    let node_path = &args[1];
-    let cluster_path = &args[2];
-
-    let node_cfg: NodeCfg = serde_yaml::from_str(&std::fs::read_to_string(node_path)?)?;
-    let cluster_cfg: ClusterCfg = serde_yaml::from_str(&std::fs::read_to_string(cluster_path)?)?;
-
-    let my_id = node_cfg.id.clone();
-    println!("[{}] starting", my_id);
-
-    let peers_all: Vec<Peer> = cluster_cfg
-        .nodes
-        .iter()
-        .map(|p| Peer {
-            id: p.id.clone(),
-            addr: p.addr.clone(),
-        })
-        .collect();
-
-    let orders = make_orders(peers_all.clone(), cluster_cfg.num_trees);
-
-    let mut children_by_tree: Vec<Vec<Peer>> = Vec::with_capacity(cluster_cfg.num_trees);
-    for t in 0..cluster_cfg.num_trees {
-        let children = kary_children(&orders[t], &my_id, cluster_cfg.fanout);
-        children_by_tree.push(children);
-    }
-
-    // APP outgoing
-    let (tx, mut rx) = mpsc::channel::<(Peer, Vec<u8>)>(1024);
-
-    // Internal APP<->PR
-    let (pr_to_app_tx, mut pr_to_app_rx) = mpsc::channel::<String>(256);
-    let (app_to_pr_tx, mut app_to_pr_rx) = mpsc::channel::<String>(256);
-
-    let st = AppState {
-        node_id: my_id.clone(),
-        known_msgs: Arc::new(Mutex::new(HashSet::new())),
-        inbox: Arc::new(Mutex::new(VecDeque::new())),
-        children_by_tree: Arc::new(children_by_tree),
-        tx: tx.clone(),
-        pr_to_app_tx: pr_to_app_tx.clone(),
-        app_to_pr_tx: app_to_pr_tx.clone(),
-        pr_rx_count: Arc::new(Mutex::new(0)),
-        pr_tx_count: Arc::new(Mutex::new(0)),
-    };
-
-    // APP and PR listeners
-    let app_listen: SocketAddr = node_cfg.listen_addr.parse()?;
-    let mut pr_listen = app_listen;
-    pr_listen.set_port(app_listen.port() + 1);
-
-    let app_listener = TcpListener::bind(app_listen).await?;
-    println!("[{}] listening APP on {}", my_id, app_listen);
-
-    let pr_listener = TcpListener::bind(pr_listen).await?;
-    println!("[{}] listening PR  on {}", my_id, pr_listen);
-
-    // PR logger (demo)
-    let log_path = PathBuf::from(format!("peerreview_logs/{}.log", my_id));
-    std::fs::create_dir_all("peerreview_logs")?;
-
-    let signing_key = {
-        use ed25519_dalek::SigningKey;
-        let b = [my_id.as_bytes()[0]; 32];
-        SigningKey::from_bytes(&b)
-    };
-
-    let pr_id_u32 = my_id.trim_start_matches("node").parse::<u32>().unwrap_or(0);
-    let _pr_logger = Arc::new(Mutex::new(PrLogger::open(
-        pr_id_u32,
-        &log_path,
-        signing_key,
-    )?));
-
-    // PR network layer exists, can be used later
-    let _pr_net = PrNetwork::new();
-
-    // --- PR listen task (PR socket)
+async fn handle_incoming_msg(state: &Arc<AppState>, m: Msg) -> Result<()> {
+    // dedup
     {
-        let my_id_for_accept = my_id.clone();
-        let pr_to_app_tx = pr_to_app_tx.clone();
-        let pr_rx_count = st.pr_rx_count.clone();
+        let mut seen = state.seen.lock().await;
+        if !seen.insert(m.id.clone()) {
+            return Ok(());
+        }
+        let mut st = state.stats.lock().await;
+        st.unique_msg_ids = seen.len();
+    }
 
+    // deliver
+    {
+        let mut st = state.stats.lock().await;
+        st.deliver_total += 1;
+    }
+
+    // journal DELIVER
+    {
+        let hash32 = hash_msg_32(&m);
+        let ts_ms = m.ts_ms;
+        let mut lg = state.pr_logger.lock().await;
+        let _ = lg.log_app("DELIVER", None, m.id.clone(), hash32, ts_ms);
+    }
+
+    gossip_forward(state, &m).await?;
+    Ok(())
+}
+
+async fn gossip_forward(state: &Arc<AppState>, m: &Msg) -> Result<()> {
+    let bytes = bincode::serialize(m).context("bincode::serialize Msg")?;
+
+    let mut peers = state.cfg.peers.clone();
+
+    // IMPORTANT (Tokio): ne pas garder ThreadRng à travers un .await (future non-Send)
+    {
+        let mut rng = rand::thread_rng();
+        peers.shuffle(&mut rng);
+    } // <- rng DROPPÉ ici
+
+    let take = state.cfg.fanout.min(peers.len());
+    for p in peers.into_iter().take(take) {
+        let _ = state.udp.send_to(&bytes, p.app_addr).await;
+
+        // journal SEND
+        let hash32 = hash_msg_32(m);
+        let ts_ms = m.ts_ms;
+        let mut lg = state.pr_logger.lock().await;
+        let _ = lg.log_app("SEND", Some(p.id), m.id.clone(), hash32, ts_ms);
+    }
+    Ok(())
+}
+
+/// ================================
+/// PR TCP listener (simple accept + trace)
+/// ================================
+async fn pr_tcp_listener_task(state: Arc<AppState>) -> Result<()> {
+    let listener = TcpListener::bind(state.cfg.pr_addr)
+        .await
+        .with_context(|| format!("bind pr_addr {}", state.cfg.pr_addr))?;
+
+    push_event(&state, format!("[PR] listening on {}", state.cfg.pr_addr)).await;
+
+    loop {
+        let (sock, src) = listener.accept().await?;
+        let st = state.clone();
         tokio::spawn(async move {
-            loop {
-                let (mut sock, addr) = match pr_listener.accept().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("[{}] PR accept error: {}", my_id_for_accept, e);
-                        break;
-                    }
-                };
-
-                println!("[{}] PR connection from {}", my_id_for_accept, addr);
-
-                let pr_to_app_tx = pr_to_app_tx.clone();
-                let pr_rx_count = pr_rx_count.clone();
-                let my_id_conn = my_id_for_accept.clone();
-
-                tokio::spawn(async move {
-                    loop {
-                        let mut len_buf = [0u8; 4];
-                        if sock.read_exact(&mut len_buf).await.is_err() {
-                            break;
-                        }
-                        let len = u32::from_be_bytes(len_buf) as usize;
-                        let mut buf = vec![0u8; len];
-                        if sock.read_exact(&mut buf).await.is_err() {
-                            break;
-                        }
-
-                        *pr_rx_count.lock().unwrap() += 1;
-
-                        if let Ok((msg, _used)) = bincode2::decode_from_slice::<PeerReviewMsg, _>(
-                            &buf,
-                            bincode2::config::standard(),
-                        ) {
-                            println!("[{}] PR {:?}", my_id_conn, msg);
-                            let _ = pr_to_app_tx.send(format!("PR_RX {:?}", msg)).await;
-                        } else {
-                            println!("[{}] PR RAW {} bytes from {}", my_id_conn, len, addr);
-                        }
-                    }
-                });
+            let st2 = st.clone(); // pour pouvoir relogger après un move
+            if let Err(e) = handle_pr_connection(st, sock, src).await {
+                let _ = push_event(&st2, format!("[PR] conn err: {e:#}")).await;
             }
         });
     }
+}
 
-    // --- APP send loop task
-    tokio::spawn(async move {
-        while let Some((peer, bytes)) = rx.recv().await {
-            match TcpStream::connect(&peer.addr).await {
-                Ok(mut stream) => {
-                    let len = bytes.len() as u32;
-                    let mut frame = Vec::with_capacity(4 + bytes.len());
-                    frame.extend_from_slice(&len.to_be_bytes());
-                    frame.extend_from_slice(&bytes);
-                    let _ = stream.write_all(&frame).await;
-                }
-                Err(e) => {
-                    eprintln!("send connect {} failed: {}", peer.addr, e);
-                }
-            }
+async fn handle_pr_connection(state: Arc<AppState>, _sock: TcpStream, src: SocketAddr) -> Result<()> {
+    {
+        let mut lg = state.pr_logger.lock().await;
+        let _ = lg.log_pr_in(&format!("accepted tcp PR from {src}"));
+    }
+    push_event(&state, format!("[PR] accepted {src}")).await;
+    Ok(())
+}
+
+/// ================================
+/// Heartbeat scheduler
+/// ================================
+async fn heartbeat_task(state: Arc<AppState>) -> Result<()> {
+    loop {
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        let counter = state.hb_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let tree_id = if state.cfg.num_trees == 0 {
+            0u8
+        } else {
+            (counter % (state.cfg.num_trees as u64)) as u8
+        };
+
+        let ts_ms = now_ms();
+        let id = format!("{}-hb-{}-{}", state.cfg.my_name, tree_id, counter);
+
+        let msg = Msg {
+            id,
+            from: state.cfg.my_name.clone(),
+            kind: MsgKind::Heartbeat { counter, tree_id },
+            payload: Vec::new(),
+            ts_ms,
+            tree_id,
+        };
+
+        handle_incoming_msg(&state, msg).await?;
+    }
+}
+
+/// ================================
+/// HTTP
+/// ================================
+#[derive(serde::Deserialize)]
+struct PublishTextIn {
+    text: String,
+}
+
+async fn http_stats(State(state): State<Arc<AppState>>) -> Json<StatsOut> {
+    let st = state.stats.lock().await;
+    let ev = state.last_events.lock().await;
+
+    Json(StatsOut {
+        me: state.cfg.my_name.clone(),
+        recv_total: st.recv_total,
+        deliver_total: st.deliver_total,
+        hb_total: st.hb_total,
+        publish_text_total: st.publish_text_total,
+        publish_bin_total: st.publish_bin_total,
+        unique_msg_ids: st.unique_msg_ids,
+        last_events: ev.iter().cloned().collect(),
+    })
+}
+
+// NOTE: handlers axum -> utilise std::result::Result (PAS anyhow::Result)
+async fn http_publish_text(
+    State(state): State<Arc<AppState>>,
+    Json(inp): Json<PublishTextIn>,
+) -> impl IntoResponse {
+    let ts_ms = now_ms();
+    let id = format!("{}-txt-{}", state.cfg.my_name, ts_ms);
+
+    let msg = Msg {
+        id: id.clone(),
+        from: state.cfg.my_name.clone(),
+        kind: MsgKind::PublishText,
+        payload: inp.text.into_bytes(),
+        ts_ms,
+        tree_id: 0,
+    };
+
+    if let Err(e) = handle_incoming_msg(&state, msg).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "err": format!("{e:#}") })),
+        );
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true, "msg_id": id })))
+}
+
+#[derive(serde::Deserialize)]
+struct PublishBinaryDemoIn {
+    total_bytes: usize,
+    chunk_size: usize,
+    tree_id: u8,
+}
+
+async fn http_publish_binary_demo(
+    State(state): State<Arc<AppState>>,
+    Json(inp): Json<PublishBinaryDemoIn>,
+) -> impl IntoResponse {
+    let total = inp.total_bytes.max(1);
+    let chunk_size = inp.chunk_size.max(1);
+    let tree_id = inp.tree_id;
+
+    let total_chunks = (total + chunk_size - 1) / chunk_size;
+
+    // payload random
+    let mut all = vec![0u8; total];
+
+    // IMPORTANT (Tokio): ne pas garder ThreadRng à travers un .await (future non-Send)
+    {
+        let mut rng = rand::thread_rng();
+        rng.fill_bytes(&mut all);
+    } // <- rng DROPPÉ ici
+
+    for idx in 0..total_chunks {
+        let start = idx * chunk_size;
+        let end = ((idx + 1) * chunk_size).min(total);
+        let chunk = &all[start..end];
+
+        let ts_ms = now_ms();
+        let id = format!("{}-bin-{}-{}-{}", state.cfg.my_name, tree_id, idx, ts_ms);
+
+        // IMPORTANT: chez toi PublishBinaryChunk est un variant "unit",
+        // donc on encode idx/total_chunks dans payload si besoin.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(idx as u32).to_be_bytes());
+        payload.extend_from_slice(&(total_chunks as u32).to_be_bytes());
+        payload.extend_from_slice(chunk);
+
+        let msg = Msg {
+            id,
+            from: state.cfg.my_name.clone(),
+            kind: MsgKind::PublishBinaryChunk,
+            payload,
+            ts_ms,
+            tree_id,
+        };
+
+        if let Err(e) = handle_incoming_msg(&state, msg).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "err": format!("{e:#}") })),
+            );
         }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "total_bytes": total,
+            "chunk_size": chunk_size,
+            "total_chunks": total_chunks,
+            "tree_id": tree_id
+        })),
+    )
+}
+
+async fn run_http_server(state: Arc<AppState>) -> Result<()> {
+    let bind = state
+        .cfg
+        .http_addr
+        .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+
+    let app = Router::new()
+        .route("/stats", get(http_stats))
+        .route("/publish_text", post(http_publish_text))
+        .route("/publish_binary_demo", post(http_publish_binary_demo))
+        .with_state(state);
+
+    let listener = TcpListener::bind(bind).await?;
+    let local = listener.local_addr()?;
+    println!("[http] listening on http://{local}");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// ================================
+/// MAIN
+/// ================================
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let cfg = parse_cluster(&args)?;
+
+    // UDP bind
+    let udp = Arc::new(
+        UdpSocket::bind(cfg.app_addr)
+            .await
+            .with_context(|| format!("bind app_addr {}", cfg.app_addr))?,
+    );
+
+    // log dir + file
+    std::fs::create_dir_all(&args.log_dir).ok();
+    let log_path = args.log_dir.join(format!("{}.log", cfg.my_name));
+
+    // signing key déterministe
+    let signing_key = signing_key_from_node_name(&cfg.my_name);
+
+    // Logger::open chez toi : open(node_id, path, signing_key)
+    let pr_logger = PrLogger::open(cfg.my_id, &log_path, signing_key)
+        .with_context(|| format!("Logger::open failed: {}", log_path.display()))?;
+
+    let state = Arc::new(AppState {
+        cfg,
+        udp,
+        stats: Mutex::new(AppStats::default()),
+        seen: Mutex::new(HashSet::new()),
+        last_events: Mutex::new(VecDeque::new()),
+        pr_logger: Mutex::new(pr_logger),
+        hb_counter: AtomicU64::new(0),
     });
 
-    // --- Heartbeats per tree
-    {
-        let stc = st.clone();
-        let hb_ms = node_cfg.heartbeat_ms;
-        tokio::spawn(async move {
-            let mut counter: u64 = 0;
-            loop {
-                sleep(Duration::from_millis(hb_ms)).await;
-                counter += 1;
+    push_event(
+        &state,
+        format!(
+            "[boot] me={} app={} pr={}",
+            state.cfg.my_name, state.cfg.app_addr, state.cfg.pr_addr
+        ),
+    )
+    .await;
 
-                for t in 0..stc.children_by_tree.len() {
-                    let tt = t as u8;
+    // tasks
+    let t_udp: JoinHandle<Result<()>> = tokio::spawn(udp_listener_task(state.clone()));
+    let t_pr: JoinHandle<Result<()>> = tokio::spawn(pr_tcp_listener_task(state.clone()));
+    let t_hb: JoinHandle<Result<()>> = tokio::spawn(heartbeat_task(state.clone()));
 
-                    let msg = Msg {
-                        id: format!("{}-hb-{}-{}", stc.node_id, tt, counter),
-                        from: stc.node_id.clone(),
-                        tree_id: tt,
-                        kind: MsgKind::Heartbeat {
-                            tree_id: tt,
-                            counter,
-                        },
-                        payload: vec![],
-                        ts_ms: now_ms(),
-                    };
+    let t_http: Option<JoinHandle<Result<()>>> = if args.http {
+        Some(tokio::spawn(run_http_server(state.clone())))
+    } else {
+        None
+    };
 
-                    let key = (msg.tree_id as u32, msg.id.clone());
-                    stc.known_msgs.lock().unwrap().insert(key);
+    // wait ctrl+c
+    tokio::signal::ctrl_c().await.ok();
+    push_event(&state, "[shutdown] ctrl_c received").await;
 
-                    let bytes = bincode::serialize(&msg).unwrap();
-                    for peer in &stc.children_by_tree[t] {
-                        let _ = stc.tx.send((peer.clone(), bytes.clone())).await;
-                    }
-                }
-            }
-        });
+    t_udp.abort();
+    t_pr.abort();
+    t_hb.abort();
+    if let Some(t) = t_http {
+        t.abort();
     }
 
-    // --- Internal PR -> APP
-    {
-        let stc = st.clone();
-        tokio::spawn(async move {
-            while let Some(line) = pr_to_app_rx.recv().await {
-                let mut inbox = stc.inbox.lock().unwrap();
-                push_inbox(&mut inbox, format!("[INTERNAL PR->APP] {}", line));
-            }
-        });
-    }
-
-    // --- Internal APP -> PR (observable trace)
-    {
-        let my_id2 = my_id.clone();
-        let pr_tx_count = st.pr_tx_count.clone();
-        tokio::spawn(async move {
-            let mut ctr: u64 = 0;
-            while let Some(line) = app_to_pr_rx.recv().await {
-                ctr += 1;
-                *pr_tx_count.lock().unwrap() += 1;
-                println!("[{}] [INTERNAL APP->PR] {} {}", my_id2, ctr, line);
-            }
-        });
-    }
-
-    // --- HTTP server
-    let http_addr = SocketAddr::from(([0, 0, 0, 0], node_cfg.http_api));
-    let app = Router::new()
-        .route("/stats", get(get_stats))
-        .route("/publish", post(post_publish))
-        .route("/publish_binary_demo", post(post_publish_binary_demo))
-        .with_state(st.clone());
-
-    {
-        let my_id_http = my_id.clone();
-        tokio::spawn(async move {
-            println!("[{}] HTTP on http://{}", my_id_http, http_addr);
-            axum::serve(tokio::net::TcpListener::bind(http_addr).await.unwrap(), app)
-                .await
-                .unwrap();
-        });
-    }
-
-    // --- APP receive loop
-    loop {
-        let (mut sock, _addr) = app_listener.accept().await?;
-        let stc = st.clone();
-
-        tokio::spawn(async move {
-            loop {
-                let mut len_buf = [0u8; 4];
-                if sock.read_exact(&mut len_buf).await.is_err() {
-                    break;
-                }
-                let len = u32::from_be_bytes(len_buf) as usize;
-                let mut buf = vec![0u8; len];
-                if sock.read_exact(&mut buf).await.is_err() {
-                    break;
-                }
-
-                let msg: Msg = match bincode::deserialize(&buf) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("APP decode error: {}", e);
-                        continue;
-                    }
-                };
-
-                let key = (msg.tree_id as u32, msg.id.clone());
-                if !stc.known_msgs.lock().unwrap().insert(key) {
-                    continue;
-                }
-
-                match &msg.kind {
-                    MsgKind::PublishText => {
-                        let text = String::from_utf8_lossy(&msg.payload).to_string();
-                        {
-                            let mut inbox = stc.inbox.lock().unwrap();
-                            push_inbox(
-                                &mut inbox,
-                                format!("(t{} from {}) {}", msg.tree_id, msg.from, text),
-                            );
-                        }
-                        let _ = stc
-                            .app_to_pr_tx
-                            .send(format!(
-                                "TEXT tree={} from={} id={}",
-                                msg.tree_id, msg.from, msg.id
-                            ))
-                            .await;
-                    }
-
-                    MsgKind::PublishBinaryChunk => {
-                        if let Ok(chunk) = bincode::deserialize::<BinaryChunk>(&msg.payload) {
-                            let mut inbox = stc.inbox.lock().unwrap();
-                            push_inbox(
-                                &mut inbox,
-                                format!(
-                                    "(BIN t{} from {} file_id={} chunk {}/{} size={})",
-                                    msg.tree_id,
-                                    msg.from,
-                                    chunk.file_id,
-                                    chunk.index + 1,
-                                    chunk.total_chunks,
-                                    chunk.data.len()
-                                ),
-                            );
-                        }
-
-                        let _ = stc
-                            .app_to_pr_tx
-                            .send(format!(
-                                "BIN tree={} from={} id={}",
-                                msg.tree_id, msg.from, msg.id
-                            ))
-                            .await;
-                    }
-
-                    MsgKind::Heartbeat { .. } => { /* silent */ }
-                }
-
-                // relay
-                let t = msg.tree_id as usize;
-                if t < stc.children_by_tree.len() {
-                    let bytes = bincode::serialize(&msg).unwrap();
-                    for peer in &stc.children_by_tree[t] {
-                        let _ = stc.tx.send((peer.clone(), bytes.clone())).await;
-                    }
-                }
-            }
-        });
-    }
+    Ok(())
 }

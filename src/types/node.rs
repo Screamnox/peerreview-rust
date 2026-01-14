@@ -1,10 +1,8 @@
 use bincode::{Decode, Encode};
 use ed25519_dalek::{Keypair, PublicKey};
 use std::collections::HashMap;
-use std::net::TcpStream;
-use std::sync::{Arc, Mutex};
 
-use crate::journal::Logger;
+use crate::{journal::Logger, types::PeerReviewMsg};
 
 pub type NodeId = u32;
 
@@ -17,10 +15,10 @@ pub enum PeerStatus {
 }
 
 /// Information sur un noeud pair
+#[derive(Clone)]
 pub struct PeerInfo {
     pub id: NodeId,
     pub public_key: PublicKey,
-    pub socket: Arc<Mutex<TcpStream>>,
     pub status: PeerStatus,
     pub witnesses: Vec<NodeId>,
 }
@@ -78,7 +76,6 @@ impl Node {
         &mut self,
         id: NodeId,
         public_key: PublicKey,
-        socket: TcpStream,
         witnesses: Vec<NodeId>,
     ) {
         self.peers.insert(
@@ -86,7 +83,6 @@ impl Node {
             PeerInfo {
                 id,
                 public_key,
-                socket: Arc::new(Mutex::new(socket)),
                 status: PeerStatus::Trusted,
                 witnesses,
             },
@@ -97,11 +93,6 @@ impl Node {
     /// Récupère la clé publique d'un pair (pour vérifications cryptographiques)
     pub fn get_peer_public_key(&self, peer_id: NodeId) -> Option<&PublicKey> {
         self.peers.get(&peer_id).map(|p| &p.public_key)
-    }
-
-    /// Récupère la socket TCP d'un pair
-    pub fn get_peer_socket(&self, peer_id: NodeId) -> Option<Arc<Mutex<TcpStream>>> {
-        self.peers.get(&peer_id).map(|p| Arc::clone(&p.socket))
     }
 
     /// Récupère le statut d'un pair
@@ -132,5 +123,10 @@ impl Node {
             .filter(|(_, info)| info.status == status)
             .map(|(id, _)| *id)
             .collect()
+    }
+
+    // TODO: on_message
+    pub fn on_message(peer_id: NodeId, msg: PeerReviewMsg) {
+        unimplemented!();
     }
 }

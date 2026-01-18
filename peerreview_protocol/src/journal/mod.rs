@@ -1,5 +1,5 @@
 pub mod entry;
+pub mod file_utils;
 pub mod logger;
 
-pub use entry::LogEntry;
 pub use logger::Logger;

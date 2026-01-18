@@ -4,7 +4,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: node1
-    command: ["--name","node1","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http"]
+    command: ["--name","node1","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http","--fault","forge_recv_from=node4"]
     ports: ["8081:8081"]
     networks:
       gossip_net:
@@ -19,7 +19,7 @@ services:
   node2:
     <<: *node
     container_name: node2
-    command: ["--name","node2","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http"]
+    command: ["--name","node2","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http","--fault","forge_recv_from=node4"]
     ports: ["8082:8082"]
     networks:
       gossip_net:
@@ -30,7 +30,7 @@ services:
   node3:
     <<: *node
     container_name: node3
-    command: ["--name","node3","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http"]
+    command: ["--name","node3","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http","--fault","forge_recv_from=node4"]
     ports: ["8083:8083"]
     networks:
       gossip_net:
@@ -41,7 +41,7 @@ services:
   node4:
     <<: *node
     container_name: node4
-    command: ["--name","node4","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http"]
+    command: ["--name","node4","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http","--fault","forge_recv_from=node4"]
     ports: ["8084:8084"]
     networks:
       gossip_net:
@@ -52,7 +52,7 @@ services:
   node5:
     <<: *node
     container_name: node5
-    command: ["--name","node5","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http"]
+    command: ["--name","node5","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http","--fault","forge_recv_from=node4"]
     ports: ["8085:8085"]
     networks:
       gossip_net:
@@ -63,7 +63,7 @@ services:
   node6:
     <<: *node
     container_name: node6
-    command: ["--name","node6","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http"]
+    command: ["--name","node6","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http","--fault","forge_recv_from=node4"]
     ports: ["8086:8086"]
     networks:
       gossip_net:
@@ -74,7 +74,7 @@ services:
   node7:
     <<: *node
     container_name: node7
-    command: ["--name","node7","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http"]
+    command: ["--name","node7","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http","--fault","forge_recv_from=node4"]
     ports: ["8087:8087"]
     networks:
       gossip_net:
@@ -85,7 +85,7 @@ services:
   node8:
     <<: *node
     container_name: node8
-    command: ["--name","node8","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http"]
+    command: ["--name","node8","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http","--fault","forge_recv_from=node4"]
     ports: ["8088:8088"]
     networks:
       gossip_net:
@@ -96,7 +96,7 @@ services:
   node9:
     <<: *node
     container_name: node9
-    command: ["--name","node9","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http"]
+    command: ["--name","node9","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http","--fault","forge_recv_from=node4"]
     ports: ["8089:8089"]
     networks:
       gossip_net:
@@ -107,7 +107,7 @@ services:
   node10:
     <<: *node
     container_name: node10
-    command: ["--name","node10","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http"]
+    command: ["--name","node10","--cluster","configs/docker/cluster.yaml","--log-dir","peerreview_logs","--http","--fault","forge_recv_from=node4"]
     ports: ["8090:8090"]
     networks:
       gossip_net:

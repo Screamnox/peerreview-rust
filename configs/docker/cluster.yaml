@@ -1,64 +1,66 @@
 nodes:
   - id: 1
     name: node1
-    app_addr: "172.30.0.11:7001"
-    pr_addr: "172.30.0.11:7002"
-    http_addr: "0.0.0.0:8081"
+    app_addr: node1:7001
+    pr_addr: node1:7002
+    http_addr: 0.0.0.0:8081
 
   - id: 2
     name: node2
-    app_addr: "172.30.0.12:7001"
-    pr_addr: "172.30.0.12:7002"
-    http_addr: "0.0.0.0:8082"
+    app_addr: node2:7001
+    pr_addr: node2:7002
+    http_addr: 0.0.0.0:8082
 
   - id: 3
     name: node3
-    app_addr: "172.30.0.13:7001"
-    pr_addr: "172.30.0.13:7002"
-    http_addr: "0.0.0.0:8083"
+    app_addr: node3:7001
+    pr_addr: node3:7002
+    http_addr: 0.0.0.0:8083
 
   - id: 4
     name: node4
-    app_addr: "172.30.0.14:7001"
-    pr_addr: "172.30.0.14:7002"
-    http_addr: "0.0.0.0:8084"
+    app_addr: node4:7001
+    pr_addr: node4:7002
+    http_addr: 0.0.0.0:8084
 
   - id: 5
     name: node5
-    app_addr: "172.30.0.15:7001"
-    pr_addr: "172.30.0.15:7002"
-    http_addr: "0.0.0.0:8085"
+    app_addr: node5:7001
+    pr_addr: node5:7002
+    http_addr: 0.0.0.0:8085
 
   - id: 6
     name: node6
-    app_addr: "172.30.0.16:7001"
-    pr_addr: "172.30.0.16:7002"
-    http_addr: "0.0.0.0:8086"
+    app_addr: node6:7001
+    pr_addr: node6:7002
+    http_addr: 0.0.0.0:8086
 
   - id: 7
     name: node7
-    app_addr: "172.30.0.17:7001"
-    pr_addr: "172.30.0.17:7002"
-    http_addr: "0.0.0.0:8087"
+    app_addr: node7:7001
+    pr_addr: node7:7002
+    http_addr: 0.0.0.0:8087
 
   - id: 8
     name: node8
-    app_addr: "172.30.0.18:7001"
-    pr_addr: "172.30.0.18:7002"
-    http_addr: "0.0.0.0:8088"
+    app_addr: node8:7001
+    pr_addr: node8:7002
+    http_addr: 0.0.0.0:8088
 
   - id: 9
     name: node9
-    app_addr: "172.30.0.19:7001"
-    pr_addr: "172.30.0.19:7002"
-    http_addr: "0.0.0.0:8089"
+    app_addr: node9:7001
+    pr_addr: node9:7002
+    http_addr: 0.0.0.0:8089
 
   - id: 10
     name: node10
-    app_addr: "172.30.0.20:7001"
-    pr_addr: "172.30.0.20:7002"
-    http_addr: "0.0.0.0:8090"
+    app_addr: node10:7001
+    pr_addr: node10:7002
+    http_addr: 0.0.0.0:8090
 
 fanout: 2
-
 num_trees: 3
+
+# Témoins explicites (minimal démo)
+witnesses: ["node1", "node2", "node3"]

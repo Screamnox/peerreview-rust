@@ -9,3 +9,8 @@
 
 # Docker
 **/*.log
+
+# PeerReview logs & demos
+peerreview_logs/
+peerreview_logs_*/
+tmp/

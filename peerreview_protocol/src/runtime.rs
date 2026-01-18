@@ -1,9 +1,9 @@
 use std::io;
-use tokio::task::JoinHandle;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
-use crate::types::NodeId;
 use crate::types::messages::PeerReviewMsg;
+use crate::types::NodeId;
 
 /// Runtime léger et stable : il ne force pas l’architecture réseau,
 /// mais donne une structure standard "comme dans l’article":
@@ -43,7 +43,8 @@ impl PeerReviewRuntime {
     pub async fn join(mut self) -> io::Result<()> {
         while let Some(h) = self.handles.pop() {
             // Si une tâche panique, on remonte une erreur propre
-            h.await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            h.await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         }
         Ok(())
     }

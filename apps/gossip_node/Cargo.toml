@@ -3,33 +3,22 @@ name = "gossip_node"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "gossip_node"
-path = "src/main.rs"
-
 [dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+tokio = { version = "1.48", features = ["full"] }
+
+axum = "0.7"
+tower-http = { version = "0.6", features = ["trace"] }
+
+rand = "0.8"
+sha2 = "0.10"
+
+common_proto = { path = "../../crates/common_proto" }
 peerreview_protocol = { path = "../../peerreview_protocol" }
-common_proto        = { path = "../../crates/common_proto" }
-
-anyhow  = "1"
-clap    = { version = "4", features = ["derive"] }
-
-tokio   = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
-
-serde   = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-
-bincode = "1"
-
-sha2    = "0.10"
-hex     = "0.4"
-base64  = "0.22"
-
-rand    = "0.8"
-
-axum    = "0.7"
-hyper   = "1"
-hyper-util = "0.1"
-tower   = "0.5"
 ed25519-dalek = "2"
+clap = { version = "4", features = ["derive"] }
+bincode = "2"
+hex = "0.4"

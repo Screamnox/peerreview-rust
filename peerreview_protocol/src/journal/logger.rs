@@ -1,218 +1,200 @@
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
-
+use crate::journal::entry::{now_ms, LogEntry};
+use crate::types::NodeId;
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey, SigningKey};
 use sha2::{Digest, Sha256};
-
-use crate::journal::entry::LogEntry;
-use crate::types::NodeId;
+use std::fs::{create_dir_all, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 
 pub struct Logger {
     node_id: NodeId,
-    file: File,
-    signing_key: SigningKey,
+    pub file: File,
     seq: u64,
-
-    /// hash(chain) of previous entry
     prev_hash32: [u8; 32],
+    signing_key: SigningKey,
+    path: PathBuf,
 }
 
 impl Logger {
     pub fn open(
         node_id: NodeId,
-        log_path: impl AsRef<Path>,
+        log_dir: impl AsRef<Path>,
         signing_key: SigningKey,
-    ) -> std::io::Result<Self> {
+    ) -> io::Result<Self> {
+        create_dir_all(&log_dir)?;
+        let path = log_dir.as_ref().join(format!("node{}_app.log", node_id));
+
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .read(true)
-            .open(log_path)?;
+            .open(&path)?;
+
+        let (seq, prev_hash32) = Self::recover_tail(&path).unwrap_or((0, [0u8; 32]));
 
         Ok(Self {
             node_id,
             file,
+            seq,
+            prev_hash32,
             signing_key,
-            seq: 0,
-            prev_hash32: [0u8; 32],
+            path,
         })
     }
 
-    fn append_json_line(&mut self, entry: &LogEntry) -> std::io::Result<()> {
-        let line = entry.to_json_line()?;
-        self.file.write_all(line.as_bytes())?;
-        self.file.write_all(b"\n")?;
-        self.file.flush()?;
-        Ok(())
-    }
-
-    fn sign_hash(&self, hash32: &[u8; 32]) -> [u8; 64] {
-        let sig: Signature = self.signing_key.sign(hash32);
-        sig.to_bytes()
-    }
-
-    pub fn log_app(
-        &mut self,
-        kind: &str,
-        peer: Option<NodeId>,
-        msg_id: String,
-        hash32: [u8; 32],
-        ts_ms: u64,
-    ) -> std::io::Result<()> {
-        self.seq += 1;
-
-        let payload = format!(
-            "msg_id={} peer={:?} ts_ms={} hash={}",
-            msg_id,
-            peer,
-            ts_ms,
-            hex::encode(hash32)
-        );
-
-        // stable digest for this log line (not the same as msg hash32)
+    fn compute_hash32(prev: [u8; 32], seq: u64, peer: u32, kind: &str, payload: &str) -> [u8; 32] {
         let mut h = Sha256::new();
+        h.update(&prev);
+        h.update(seq.to_be_bytes());
+        h.update(peer.to_be_bytes());
         h.update(kind.as_bytes());
-        if let Some(p) = peer {
-            h.update(p.to_be_bytes());
-        }
-        h.update(msg_id.as_bytes());
-        h.update(ts_ms.to_be_bytes());
-        h.update(hash32);
-
-        let digest = h.finalize();
-        let mut line_hash = [0u8; 32];
-        line_hash.copy_from_slice(&digest[..]);
-
-        let sig64 = self.sign_hash(&line_hash);
-
-        let entry = LogEntry::new(
-            self.seq,
-            peer.unwrap_or(0),
-            kind,
-            line_hash,
-            self.prev_hash32,
-            sig64,
-            payload,
-        );
-
-        self.append_json_line(&entry)?;
-        self.prev_hash32 = line_hash;
-        Ok(())
+        h.update(payload.as_bytes());
+        let out = h.finalize();
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&out);
+        arr
     }
 
-    pub fn log_pr_in(&mut self, line: &str) -> std::io::Result<()> {
-        self.seq += 1;
-
-        let mut h = Sha256::new();
-        h.update(b"PR_IN");
-        h.update(line.as_bytes());
-        let digest = h.finalize();
-
-        let mut line_hash = [0u8; 32];
-        line_hash.copy_from_slice(&digest[..]);
-
-        let sig64 = self.sign_hash(&line_hash);
-
-        let entry = LogEntry::new(
-            self.seq,
-            0,
-            "PR_IN",
-            line_hash,
-            self.prev_hash32,
-            sig64,
-            line.to_string(),
-        );
-
-        self.append_json_line(&entry)?;
-        self.prev_hash32 = line_hash;
-        Ok(())
-    }
-
-    pub fn log_pr_out(&mut self, line: &str) -> std::io::Result<()> {
-        self.seq += 1;
-
-        let mut h = Sha256::new();
-        h.update(b"PR_OUT");
-        h.update(line.as_bytes());
-        let digest = h.finalize();
-
-        let mut line_hash = [0u8; 32];
-        line_hash.copy_from_slice(&digest[..]);
-
-        let sig64 = self.sign_hash(&line_hash);
-
-        let entry = LogEntry::new(
-            self.seq,
-            0,
-            "PR_OUT",
-            line_hash,
-            self.prev_hash32,
-            sig64,
-            line.to_string(),
-        );
-
-        self.append_json_line(&entry)?;
-        self.prev_hash32 = line_hash;
-        Ok(())
-    }
-
-    /// Verifies:
-    /// - JSON parse
-    /// - hash len 32, sig len 64
-    /// - signature validity (sig over stored hash bytes)
-    /// - seq monotonic (+1)
-    /// - optional strict chain: prev_hash must match previous entry hash
-    pub fn verify_log_file(
-        path: impl AsRef<Path>,
-        verifying_key: &VerifyingKey,
-        strict_chain: bool,
-    ) -> std::io::Result<()> {
+    fn recover_tail(path: &Path) -> io::Result<(u64, [u8; 32])> {
         let f = File::open(path)?;
+        let mut last_seq = 0u64;
+        let mut last_hash = [0u8; 32];
+
+        for line in BufReader::new(f).lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let e = LogEntry::from_json_line(&line)?;
+            last_seq = e.seq;
+            last_hash = e.hash_bytes_32()?;
+        }
+        Ok((last_seq, last_hash))
+    }
+
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    pub fn prev_hash32(&self) -> [u8; 32] {
+        self.prev_hash32
+    }
+
+    pub fn read_log_window(&self, from_seq: u64, to_seq: u64) -> io::Result<Vec<String>> {
+        let f = File::open(&self.path)?;
         let r = BufReader::new(f);
 
-        let mut expected_seq: u64 = 1;
-        let mut prev_hash32: [u8; 32] = [0u8; 32];
-
+        let mut out = Vec::new();
         for line in r.lines() {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
             }
+            let e = LogEntry::from_json_line(&line)?;
+            if e.seq >= from_seq && e.seq <= to_seq {
+                out.push(line);
+            }
+        }
+        Ok(out)
+    }
 
-            let entry = LogEntry::from_json_line(&line)?;
+    /// Generic event logger with arbitrary payload (parseable by audit tools).
+    pub fn log_event(&mut self, kind: &str, peer: Option<u32>, payload: String) -> io::Result<()> {
+        let peer = peer.unwrap_or(0);
 
-            // seq monotonic
-            if entry.seq != expected_seq {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("bad seq: got {}, expected {}", entry.seq, expected_seq),
+        self.seq += 1;
+        let entry_hash32 = Self::compute_hash32(self.prev_hash32, self.seq, peer, kind, &payload);
+        let sig: Signature = self.signing_key.sign(&entry_hash32);
+
+        let entry = LogEntry::new(
+            self.seq,
+            peer,
+            kind,
+            entry_hash32,
+            self.prev_hash32,
+            sig.to_bytes(),
+            payload,
+        );
+
+        writeln!(self.file, "{}", entry.to_json_line()?)?;
+        self.file.flush()?;
+        self.prev_hash32 = entry.hash_bytes_32()?;
+        Ok(())
+    }
+
+    /// Backward compat helper (kept).
+    pub fn log_app(
+        &mut self,
+        kind: &str,
+        peer: Option<u32>,
+        msg_id: String,
+        hash32: [u8; 32],
+        ts_ms: u64,
+    ) -> io::Result<()> {
+        let payload = format!("ts={ts_ms} msg_id={msg_id} hash32={}", hex::encode(hash32));
+        self.log_event(kind, peer, payload)
+    }
+
+    pub fn log_pr_in(&mut self, line: &str) -> io::Result<()> {
+        let payload = format!("ts={} {line}", now_ms());
+        self.log_event("PR_IN", None, payload)
+    }
+
+    pub fn log_pr_out(&mut self, line: &str) -> io::Result<()> {
+        let payload = format!("ts={} {line}", now_ms());
+        self.log_event("PR_OUT", None, payload)
+    }
+
+    pub fn verify_log_file(path: impl AsRef<Path>, vk: &VerifyingKey, strict: bool) -> io::Result<()> {
+        let f = File::open(path)?;
+        let mut prev: [u8; 32] = [0u8; 32];
+        let mut last_seq: u64 = 0;
+
+        for (i, line) in BufReader::new(f).lines().enumerate() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let entry = LogEntry::from_json_line(&line).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("bad json at line {}: {e}", i + 1),
+                )
+            })?;
+
+            let prev_arr = entry.prev_hash_bytes_32()?;
+            if strict && prev_arr != prev {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("hash chain broken at line {}: prev_hash mismatch", i + 1),
                 ));
             }
-            expected_seq += 1;
 
-            // strict chaining
-            if strict_chain {
-                let got_prev = entry.prev_hash_bytes_32()?;
-                if got_prev != prev_hash32 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "prev_hash chain mismatch",
-                    ));
-                }
-            }
-
-            let hash32 = entry.hash_bytes_32()?;
+            let hash_arr = entry.hash_bytes_32()?;
             let sig64 = entry.sig_bytes_64()?;
             let sig = Signature::from_bytes(&sig64);
+            vk.verify(&hash_arr, &sig).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("signature invalid at line {}: {e}", i + 1),
+                )
+            })?;
 
-            verifying_key
-                .verify(&hash32, &sig)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            if strict && entry.seq <= last_seq {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("seq not increasing at line {}", i + 1),
+                ));
+            }
 
-            prev_hash32 = hash32;
+            last_seq = entry.seq;
+            prev = hash_arr;
         }
 
         Ok(())
+    }
+
+    pub fn log_path_for(node_id: NodeId, log_dir: impl AsRef<Path>) -> PathBuf {
+        log_dir.as_ref().join(format!("node{}_app.log", node_id))
     }
 }

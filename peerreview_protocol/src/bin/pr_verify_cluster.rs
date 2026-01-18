@@ -2,7 +2,7 @@ use clap::Parser;
 use ed25519_dalek::VerifyingKey;
 use peerreview_protocol::journal::entry::LogEntry;
 use peerreview_protocol::journal::logger::Logger;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
@@ -198,7 +198,10 @@ fn main() {
     // but catches “send logged but nobody received”).
     for (mid, senders) in &sends {
         if !recvs.contains_key(mid) {
-            eprintln!("FAULT: message {mid} has SEND by {:?} but no RECV anywhere (omission/crash)", senders);
+            eprintln!(
+                "FAULT: message {mid} has SEND by {:?} but no RECV anywhere (omission/crash)",
+                senders
+            );
             std::process::exit(2);
         }
     }

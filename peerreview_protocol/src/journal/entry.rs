@@ -1,22 +1,14 @@
 use serde::{Deserialize, Serialize};
-use std::io;
+use std::{io, time::SystemTime};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct LogEntry {
     pub seq: u64,
     pub peer: u32,
     pub kind: String,
-
-    /// SHA256 digest bytes
-    pub hash: Vec<u8>, // must be len=32
-
-    /// Chaining hash bytes (previous entry hash)
-    pub prev_hash: Vec<u8>, // must be len=32
-
-    /// Ed25519 signature bytes over `hash` (NOT over JSON)
-    pub sig: Vec<u8>, // must be len=64
-
-    /// Human-readable payload
+    pub hash: Vec<u8>,      // 32 bytes
+    pub prev_hash: Vec<u8>, // 32 bytes
+    pub sig: Vec<u8>,       // 64 bytes
     pub payload: String,
 }
 
@@ -42,13 +34,11 @@ impl LogEntry {
     }
 
     pub fn to_json_line(&self) -> io::Result<String> {
-        serde_json::to_string(self)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+        serde_json::to_string(self).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
     pub fn from_json_line(s: &str) -> io::Result<Self> {
-        serde_json::from_str(s)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+        serde_json::from_str(s).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     pub fn hash_bytes_32(&self) -> io::Result<[u8; 32]> {
@@ -86,4 +76,11 @@ impl LogEntry {
         out.copy_from_slice(&self.sig);
         Ok(out)
     }
+}
+
+pub fn now_ms() -> u64 {
+    let d = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    (d.as_secs() * 1000) + (d.subsec_millis() as u64)
 }

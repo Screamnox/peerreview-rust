@@ -1,603 +1,761 @@
-use std::{
-    collections::{HashSet, VecDeque},
-    net::SocketAddr,
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
-
+use bincode::{Decode, Encode};
+use clap::Parser;
 use anyhow::{Context, Result};
 use axum::{
     extract::State,
-    http::StatusCode,
-    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use clap::Parser;
-use common_proto::{Msg, MsgKind};
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use peerreview_protocol::{
-    journal::Logger as PrLogger,
-    types::config::{ClusterConfig, ClusterNode},
+    journal::logger::Logger as PrLogger,
+    types::{
+        config::{ClusterConfig, ClusterNode},
+        messages::{Commitment, PeerReviewMsg},
+        node::{node_id_from_name, signing_key_from_name, verifying_key_from_name},
+        NodeId,
+    },
 };
-use rand::{seq::SliceRandom, RngCore};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::{
+    collections::{HashMap, VecDeque},
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::{
-    net::{TcpListener, TcpStream, UdpSocket},
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
     sync::Mutex,
-    task::JoinHandle,
+    time,
 };
 
-/// ================================
-/// CLI
-/// ================================
-#[derive(Parser, Debug, Clone)]
-#[command(author, version, about)]
-struct Args {
-    /// Nom du noeud (ex: node1, node2...). On matche sur cluster.nodes[*].name en priorité.
-    #[arg(long)]
-    name: String,
-
-    /// Fichier YAML cluster (docker/cluster.yaml)
-    #[arg(long, default_value = "docker/cluster.yaml")]
-    cluster: PathBuf,
-
-    /// Répertoire pour logs peerreview
-    #[arg(long, default_value = "peerreview_logs")]
-    log_dir: PathBuf,
-
-    /// Activer endpoints HTTP
-    #[arg(long, default_value_t = true)]
-    http: bool,
-}
-
-/// ================================
-/// Runtime data
-/// ================================
-#[derive(Clone)]
-struct Peer {
-    id: u32,
-    name: String,
-    app_addr: SocketAddr,
-    pr_addr: SocketAddr,
-}
-
-struct NodeCfg {
-    my_id: u32,
-    my_name: String,
-    app_addr: SocketAddr,
-    pr_addr: SocketAddr,
-    http_addr: Option<SocketAddr>,
-    peers: Vec<Peer>,
-    fanout: usize,
-    num_trees: u8,
-}
-
-#[derive(Default)]
-struct AppStats {
-    recv_total: u64,
-    deliver_total: u64,
-    hb_total: u64,
-    publish_text_total: u64,
-    publish_bin_total: u64,
-    unique_msg_ids: usize,
-}
-
-struct AppState {
-    cfg: NodeCfg,
-    udp: Arc<UdpSocket>,
-    stats: Mutex<AppStats>,
-    seen: Mutex<HashSet<String>>,
-    last_events: Mutex<VecDeque<String>>,
-    pr_logger: Mutex<PrLogger>,
-    hb_counter: AtomicU64,
-}
-
-#[derive(serde::Serialize)]
-struct StatsOut {
-    me: String,
-    recv_total: u64,
-    deliver_total: u64,
-    hb_total: u64,
-    publish_text_total: u64,
-    publish_bin_total: u64,
-    unique_msg_ids: usize,
-    last_events: Vec<String>,
-}
-
-/// ================================
-/// Helpers
-/// ================================
 fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
         .as_millis() as u64
 }
 
-/// Génère une SigningKey déterministe depuis le nom (sha256(name) -> 32 bytes)
-fn signing_key_from_node_name(name: &str) -> SigningKey {
+fn sha256_32(data: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(name.as_bytes());
-    let digest = h.finalize();
-    let seed: [u8; 32] = digest.as_slice().try_into().expect("sha256 len");
-    SigningKey::from_bytes(&seed)
-}
-
-/// Hash stable d’un Msg (pour journaliser)
-fn hash_msg_32(m: &Msg) -> [u8; 32] {
-    let mut h = Sha256::new();
-
-    // id, from : String
-    h.update(m.id.as_bytes());
-    h.update(b"|");
-    h.update(m.from.as_bytes());
-    h.update(b"|");
-
-    // kind : bincode stable
-    if let Ok(kb) = bincode::serialize(&m.kind) {
-        h.update(&kb);
-    } else {
-        match m.kind {
-            MsgKind::Heartbeat { .. } => h.update(b"Heartbeat"),
-            MsgKind::PublishText => h.update(b"PublishText"),
-            MsgKind::PublishBinaryChunk => h.update(b"PublishBinaryChunk"),
-        }
-    }
-
-    h.update(b"|");
-    h.update(&m.payload);
-    h.update(b"|");
-    h.update(m.ts_ms.to_be_bytes());
-    h.update([m.tree_id]);
-
+    h.update(data);
     let out = h.finalize();
-    out.as_slice().try_into().expect("sha256 len")
+    let mut a = [0u8; 32];
+    a.copy_from_slice(&out[..32]);
+    a
 }
 
-async fn push_event(state: &Arc<AppState>, s: impl Into<String>) {
-    let mut ev = state.last_events.lock().await;
-    if ev.len() >= 200 {
-        ev.pop_front();
-    }
-    ev.push_back(s.into());
-}
-
-/// ================================
-/// Cluster parsing
-/// ================================
-fn parse_cluster(args: &Args) -> Result<NodeCfg> {
-    let cluster =
-        ClusterConfig::from_yaml_file(&args.cluster).context("ClusterConfig::from_yaml_file")?;
-
-    // IMPORTANT: chez toi, fanout/num_trees sont des usize (pas Option)
-    let fanout = cluster.fanout as usize;
-    let num_trees = cluster.num_trees as u8;
-
-    let me: &ClusterNode = cluster
-        .nodes
-        .iter()
-        .find(|n| n.name == args.name)
-        .or_else(|| {
-            if let Ok(id) = args.name.parse::<u32>() {
-                cluster.nodes.iter().find(|n| n.id == id)
-            } else {
-                None
-            }
-        })
-        .with_context(|| format!("node '{}' not found in cluster config", args.name))?;
-
-    let app_addr: SocketAddr = me
-        .app_addr
-        .parse()
-        .with_context(|| format!("bad app_addr for {}: {}", me.name, me.app_addr))?;
-
-    let pr_addr: SocketAddr = me
-        .pr_addr
-        .parse()
-        .with_context(|| format!("bad pr_addr for {}: {}", me.name, me.pr_addr))?;
-
-    let http_addr: Option<SocketAddr> = me.http_addr.as_ref().and_then(|s| s.parse().ok());
-
-    let mut peers = Vec::new();
-    for p in &cluster.nodes {
-        if p.id == me.id {
-            continue;
-        }
-        let p_app: SocketAddr = p
-            .app_addr
-            .parse()
-            .with_context(|| format!("bad app_addr for {}: {}", p.name, p.app_addr))?;
-
-        let p_pr: SocketAddr = p
-            .pr_addr
-            .parse()
-            .with_context(|| format!("bad pr_addr for {}: {}", p.name, p.pr_addr))?;
-
-        peers.push(Peer {
-            id: p.id,
-            name: p.name.clone(),
-            app_addr: p_app,
-            pr_addr: p_pr,
-        });
-    }
-
-    Ok(NodeCfg {
-        my_id: me.id,
-        my_name: me.name.clone(),
-        app_addr,
-        pr_addr,
-        http_addr,
-        peers,
-        fanout,
-        num_trees,
-    })
-}
-
-/// ================================
-/// UDP listener
-/// ================================
-async fn udp_listener_task(state: Arc<AppState>) -> Result<()> {
-    let mut buf = vec![0u8; 64 * 1024];
-
-    loop {
-        let (n, src) = state.udp.recv_from(&mut buf).await?;
-        let bytes = &buf[..n];
-
-        if let Ok(m) = bincode::deserialize::<Msg>(bytes) {
-            let mid = m.id.clone();
-
-            {
-                let mut st = state.stats.lock().await;
-                st.recv_total += 1;
-                match m.kind {
-                    MsgKind::Heartbeat { .. } => st.hb_total += 1,
-                    MsgKind::PublishText => st.publish_text_total += 1,
-                    MsgKind::PublishBinaryChunk => st.publish_bin_total += 1,
-                }
-            }
-
-            // Logger::log_app chez toi prend 5 args (kind, peer, msg_id:String, hash32, ts_ms)
-            {
-                let hash32 = hash_msg_32(&m);
-                let ts_ms = m.ts_ms;
-                let mut lg = state.pr_logger.lock().await;
-                let _ = lg.log_app("RECV", Some(src.port() as u32), mid.clone(), hash32, ts_ms);
-            }
-
-            push_event(&state, format!("[UDP] from={src} id={} kind={:?}", m.id, m.kind)).await;
-
-            handle_incoming_msg(&state, m).await?;
-        } else {
-            push_event(&state, format!("[UDP] invalid msg from={src} n={n}")).await;
-        }
-    }
-}
-
-async fn handle_incoming_msg(state: &Arc<AppState>, m: Msg) -> Result<()> {
-    // dedup
-    {
-        let mut seen = state.seen.lock().await;
-        if !seen.insert(m.id.clone()) {
-            return Ok(());
-        }
-        let mut st = state.stats.lock().await;
-        st.unique_msg_ids = seen.len();
-    }
-
-    // deliver
-    {
-        let mut st = state.stats.lock().await;
-        st.deliver_total += 1;
-    }
-
-    // journal DELIVER
-    {
-        let hash32 = hash_msg_32(&m);
-        let ts_ms = m.ts_ms;
-        let mut lg = state.pr_logger.lock().await;
-        let _ = lg.log_app("DELIVER", None, m.id.clone(), hash32, ts_ms);
-    }
-
-    gossip_forward(state, &m).await?;
+/// --------------------- PR TCP (bincode2) ---------------------
+async fn pr_send(stream: &mut TcpStream, msg: &PeerReviewMsg) -> Result<()> {
+    let payload =
+        bincode::encode_to_vec(msg, bincode::config::standard()).context("bincode encode PR")?;
+    let len = payload.len() as u32;
+    stream.write_all(&len.to_be_bytes()).await?;
+    stream.write_all(&payload).await?;
     Ok(())
 }
 
-async fn gossip_forward(state: &Arc<AppState>, m: &Msg) -> Result<()> {
-    let bytes = bincode::serialize(m).context("bincode::serialize Msg")?;
-
-    let mut peers = state.cfg.peers.clone();
-
-    // IMPORTANT (Tokio): ne pas garder ThreadRng à travers un .await (future non-Send)
-    {
-        let mut rng = rand::thread_rng();
-        peers.shuffle(&mut rng);
-    } // <- rng DROPPÉ ici
-
-    let take = state.cfg.fanout.min(peers.len());
-    for p in peers.into_iter().take(take) {
-        let _ = state.udp.send_to(&bytes, p.app_addr).await;
-
-        // journal SEND
-        let hash32 = hash_msg_32(m);
-        let ts_ms = m.ts_ms;
-        let mut lg = state.pr_logger.lock().await;
-        let _ = lg.log_app("SEND", Some(p.id), m.id.clone(), hash32, ts_ms);
-    }
-    Ok(())
+async fn pr_recv(stream: &mut TcpStream) -> Result<PeerReviewMsg> {
+    let mut lenb = [0u8; 4];
+    stream.read_exact(&mut lenb).await?;
+    let len = u32::from_be_bytes(lenb) as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).await?;
+    let (msg, _) =
+        bincode::decode_from_slice::<PeerReviewMsg, _>(&buf, bincode::config::standard())
+            .context("bincode decode PR")?;
+    Ok(msg)
 }
 
-/// ================================
-/// PR TCP listener (simple accept + trace)
-/// ================================
-async fn pr_tcp_listener_task(state: Arc<AppState>) -> Result<()> {
-    let listener = TcpListener::bind(state.cfg.pr_addr)
-        .await
-        .with_context(|| format!("bind pr_addr {}", state.cfg.pr_addr))?;
-
-    push_event(&state, format!("[PR] listening on {}", state.cfg.pr_addr)).await;
-
-    loop {
-        let (sock, src) = listener.accept().await?;
-        let st = state.clone();
-        tokio::spawn(async move {
-            let st2 = st.clone(); // pour pouvoir relogger après un move
-            if let Err(e) = handle_pr_connection(st, sock, src).await {
-                let _ = push_event(&st2, format!("[PR] conn err: {e:#}")).await;
-            }
-        });
-    }
-}
-
-async fn handle_pr_connection(state: Arc<AppState>, _sock: TcpStream, src: SocketAddr) -> Result<()> {
-    {
-        let mut lg = state.pr_logger.lock().await;
-        let _ = lg.log_pr_in(&format!("accepted tcp PR from {src}"));
-    }
-    push_event(&state, format!("[PR] accepted {src}")).await;
-    Ok(())
-}
-
-/// ================================
-/// Heartbeat scheduler
-/// ================================
-async fn heartbeat_task(state: Arc<AppState>) -> Result<()> {
-    loop {
-        tokio::time::sleep(Duration::from_millis(800)).await;
-
-        let counter = state.hb_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let tree_id = if state.cfg.num_trees == 0 {
-            0u8
-        } else {
-            (counter % (state.cfg.num_trees as u64)) as u8
-        };
-
-        let ts_ms = now_ms();
-        let id = format!("{}-hb-{}-{}", state.cfg.my_name, tree_id, counter);
-
-        let msg = Msg {
-            id,
-            from: state.cfg.my_name.clone(),
-            kind: MsgKind::Heartbeat { counter, tree_id },
-            payload: Vec::new(),
-            ts_ms,
-            tree_id,
-        };
-
-        handle_incoming_msg(&state, msg).await?;
-    }
-}
-
-/// ================================
-/// HTTP
-/// ================================
-#[derive(serde::Deserialize)]
-struct PublishTextIn {
+/// --------------------- APP TCP (bincode2) ---------------------
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+struct AppMsg {
+    from: String,
+    to: String,
+    msg_id: String,
+    ts_ms: u64,
     text: String,
 }
 
-async fn http_stats(State(state): State<Arc<AppState>>) -> Json<StatsOut> {
-    let st = state.stats.lock().await;
-    let ev = state.last_events.lock().await;
-
-    Json(StatsOut {
-        me: state.cfg.my_name.clone(),
-        recv_total: st.recv_total,
-        deliver_total: st.deliver_total,
-        hb_total: st.hb_total,
-        publish_text_total: st.publish_text_total,
-        publish_bin_total: st.publish_bin_total,
-        unique_msg_ids: st.unique_msg_ids,
-        last_events: ev.iter().cloned().collect(),
-    })
-}
-
-// NOTE: handlers axum -> utilise std::result::Result (PAS anyhow::Result)
-async fn http_publish_text(
-    State(state): State<Arc<AppState>>,
-    Json(inp): Json<PublishTextIn>,
-) -> impl IntoResponse {
-    let ts_ms = now_ms();
-    let id = format!("{}-txt-{}", state.cfg.my_name, ts_ms);
-
-    let msg = Msg {
-        id: id.clone(),
-        from: state.cfg.my_name.clone(),
-        kind: MsgKind::PublishText,
-        payload: inp.text.into_bytes(),
-        ts_ms,
-        tree_id: 0,
-    };
-
-    if let Err(e) = handle_incoming_msg(&state, msg).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "ok": false, "err": format!("{e:#}") })),
-        );
-    }
-
-    (StatusCode::OK, Json(serde_json::json!({ "ok": true, "msg_id": id })))
-}
-
-#[derive(serde::Deserialize)]
-struct PublishBinaryDemoIn {
-    total_bytes: usize,
-    chunk_size: usize,
-    tree_id: u8,
-}
-
-async fn http_publish_binary_demo(
-    State(state): State<Arc<AppState>>,
-    Json(inp): Json<PublishBinaryDemoIn>,
-) -> impl IntoResponse {
-    let total = inp.total_bytes.max(1);
-    let chunk_size = inp.chunk_size.max(1);
-    let tree_id = inp.tree_id;
-
-    let total_chunks = (total + chunk_size - 1) / chunk_size;
-
-    // payload random
-    let mut all = vec![0u8; total];
-
-    // IMPORTANT (Tokio): ne pas garder ThreadRng à travers un .await (future non-Send)
-    {
-        let mut rng = rand::thread_rng();
-        rng.fill_bytes(&mut all);
-    } // <- rng DROPPÉ ici
-
-    for idx in 0..total_chunks {
-        let start = idx * chunk_size;
-        let end = ((idx + 1) * chunk_size).min(total);
-        let chunk = &all[start..end];
-
-        let ts_ms = now_ms();
-        let id = format!("{}-bin-{}-{}-{}", state.cfg.my_name, tree_id, idx, ts_ms);
-
-        // IMPORTANT: chez toi PublishBinaryChunk est un variant "unit",
-        // donc on encode idx/total_chunks dans payload si besoin.
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&(idx as u32).to_be_bytes());
-        payload.extend_from_slice(&(total_chunks as u32).to_be_bytes());
-        payload.extend_from_slice(chunk);
-
-        let msg = Msg {
-            id,
-            from: state.cfg.my_name.clone(),
-            kind: MsgKind::PublishBinaryChunk,
-            payload,
-            ts_ms,
-            tree_id,
-        };
-
-        if let Err(e) = handle_incoming_msg(&state, msg).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "ok": false, "err": format!("{e:#}") })),
-            );
-        }
-    }
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "ok": true,
-            "total_bytes": total,
-            "chunk_size": chunk_size,
-            "total_chunks": total_chunks,
-            "tree_id": tree_id
-        })),
-    )
-}
-
-async fn run_http_server(state: Arc<AppState>) -> Result<()> {
-    let bind = state
-        .cfg
-        .http_addr
-        .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
-
-    let app = Router::new()
-        .route("/stats", get(http_stats))
-        .route("/publish_text", post(http_publish_text))
-        .route("/publish_binary_demo", post(http_publish_binary_demo))
-        .with_state(state);
-
-    let listener = TcpListener::bind(bind).await?;
-    let local = listener.local_addr()?;
-    println!("[http] listening on http://{local}");
-    axum::serve(listener, app).await?;
+async fn app_send(stream: &mut TcpStream, msg: &AppMsg) -> Result<()> {
+    let payload =
+        bincode::encode_to_vec(msg, bincode::config::standard()).context("bincode encode APP")?;
+    let len = payload.len() as u32;
+    stream.write_all(&len.to_be_bytes()).await?;
+    stream.write_all(&payload).await?;
     Ok(())
 }
 
-/// ================================
-/// MAIN
-/// ================================
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = Args::parse();
-    let cfg = parse_cluster(&args)?;
+async fn app_recv(stream: &mut TcpStream) -> Result<AppMsg> {
+    let mut lenb = [0u8; 4];
+    stream.read_exact(&mut lenb).await?;
+    let len = u32::from_be_bytes(lenb) as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).await?;
+    let (msg, _) =
+        bincode::decode_from_slice::<AppMsg, _>(&buf, bincode::config::standard())
+            .context("bincode decode APP")?;
+    Ok(msg)
+}
 
-    // UDP bind
-    let udp = Arc::new(
-        UdpSocket::bind(cfg.app_addr)
-            .await
-            .with_context(|| format!("bind app_addr {}", cfg.app_addr))?,
-    );
+#[derive(Clone)]
+struct Peer {
+    id: NodeId,
+    name: String,
+    pr_addr: String,
+}
 
-    // log dir + file
-    std::fs::create_dir_all(&args.log_dir).ok();
-    let log_path = args.log_dir.join(format!("{}.log", cfg.my_name));
+#[derive(Default)]
+struct WitnessStore {
+    commits: HashMap<NodeId, Vec<Commitment>>,
+}
 
-    // signing key déterministe
-    let signing_key = signing_key_from_node_name(&cfg.my_name);
+#[derive(Clone, Default)]
+struct FaultConfig {
+    equivocate_head: bool,
+    drop_from: Option<String>,
+    forge_recv_from: Option<String>,
+}
 
-    // Logger::open chez toi : open(node_id, path, signing_key)
-    let pr_logger = PrLogger::open(cfg.my_id, &log_path, signing_key)
-        .with_context(|| format!("Logger::open failed: {}", log_path.display()))?;
+fn parse_fault(s: &str) -> FaultConfig {
+    // formats:
+    //  "equivocate_head"
+    //  "drop_from=node4"
+    //  "forge_recv_from=node4"
+    //  combinations: "equivocate_head,drop_from=node4"
+    let mut f = FaultConfig::default();
+    for part in s.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()) {
+        if part == "equivocate_head" {
+            f.equivocate_head = true;
+        } else if let Some(v) = part.strip_prefix("drop_from=") {
+            f.drop_from = Some(v.to_string());
+        } else if let Some(v) = part.strip_prefix("forge_recv_from=") {
+            f.forge_recv_from = Some(v.to_string());
+        }
+    }
+    f
+}
 
-    let state = Arc::new(AppState {
-        cfg,
-        udp,
-        stats: Mutex::new(AppStats::default()),
-        seen: Mutex::new(HashSet::new()),
-        last_events: Mutex::new(VecDeque::new()),
-        pr_logger: Mutex::new(pr_logger),
-        hb_counter: AtomicU64::new(0),
-    });
+#[derive(Clone)]
+struct AppState {
+    me_name: String,
+    me_id: NodeId,
+    me: ClusterNode,
+    cluster: ClusterConfig,
 
-    push_event(
-        &state,
+    me_sk: Arc<Mutex<SigningKey>>,
+    me_vk: VerifyingKey,
+
+    logger: Arc<Mutex<PrLogger>>,
+    witnesses: Vec<Peer>,
+    witness_store: Arc<Mutex<WitnessStore>>,
+    fault: FaultConfig,
+
+    events: Arc<Mutex<VecDeque<String>>>,
+
+    recv_total: Arc<Mutex<u64>>,
+    pr_commit_sent: Arc<Mutex<u64>>,
+    pr_commit_recv: Arc<Mutex<u64>>,
+}
+
+impl AppState {
+    async fn push_event(&self, s: impl Into<String>) {
+        let mut ev = self.events.lock().await;
+        ev.push_front(s.into());
+        while ev.len() > 40 {
+            ev.pop_back();
+        }
+    }
+
+    fn vk_for_node_id(&self, node_id: NodeId) -> Option<VerifyingKey> {
+        self.cluster
+            .find_by_id(node_id)
+            .map(|n| verifying_key_from_name(&n.name))
+    }
+
+    async fn log_kv(&self, kind: &str, payload: String) {
+        let mut lg = self.logger.lock().await;
+        let _ = lg.log_event(kind, None, payload);
+    }
+}
+
+async fn tcp_connect(addr: &str) -> Result<TcpStream> {
+    Ok(TcpStream::connect(addr)
+        .await
+        .with_context(|| format!("connect {addr}"))?)
+}
+
+fn bind_addr_from(_node_name: &str, addr: &str) -> Result<SocketAddr> {
+    if let Some((_host, port)) = addr.rsplit_once(':') {
+        let bind = format!("0.0.0.0:{port}");
+        Ok(bind.parse().context("parse bind addr")?)
+    } else {
+        Ok(addr.parse().context("parse bind addr")?)
+    }
+}
+
+async fn make_commitment_signed(
+    state: &AppState,
+    kind: &str,
+    seq: u64,
+    head_hash: [u8; 32],
+) -> Commitment {
+    let sk = state.me_sk.lock().await.clone();
+    Commitment::new_signed(state.me_id, seq, head_hash, kind.to_string(), now_ms(), &sk)
+}
+
+async fn send_commitment_to_witnesses(state: &AppState, c: Commitment) {
+    for w in &state.witnesses {
+        let mut stream = match tcp_connect(&w.pr_addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = state
+                    .push_event(format!("[PR] cannot connect witness {}: {e:#}", w.name))
+                    .await;
+                continue;
+            }
+        };
+        let msg = PeerReviewMsg::Commitment(c.clone());
+        if pr_send(&mut stream, &msg).await.is_ok() {
+            *state.pr_commit_sent.lock().await += 1;
+        }
+    }
+}
+
+async fn pr_commitment_task(state: AppState) -> Result<()> {
+    let mut tick = time::interval(Duration::from_secs(3));
+    loop {
+        tick.tick().await;
+
+        let (seq, head_hash) = {
+            let lg = state.logger.lock().await;
+            (lg.seq(), lg.prev_hash32())
+        };
+
+        if state.fault.equivocate_head && !state.witnesses.is_empty() {
+            state
+                .push_event(format!(
+                    "[PR][FAULT] equivocate_head enabled (seq={seq})"
+                ))
+                .await;
+
+            for (idx, w) in state.witnesses.iter().enumerate() {
+                let mut stream = match tcp_connect(&w.pr_addr).await {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+
+                let mut alt = head_hash;
+                if idx % 2 == 1 {
+                    let mut b = Vec::new();
+                    b.extend_from_slice(&head_hash);
+                    b.extend_from_slice(b"ALT");
+                    alt = sha256_32(&b);
+                }
+
+                let c = make_commitment_signed(&state, "LOG_HEAD", seq, alt).await;
+                let msg = PeerReviewMsg::Commitment(c.clone());
+                if pr_send(&mut stream, &msg).await.is_ok() {
+                    *state.pr_commit_sent.lock().await += 1;
+                }
+            }
+            continue;
+        }
+
+        let c = make_commitment_signed(&state, "LOG_HEAD", seq, head_hash).await;
+        send_commitment_to_witnesses(&state, c).await;
+    }
+}
+
+async fn pr_server_task(state: AppState) -> Result<()> {
+    let bind_sa = bind_addr_from(&state.me_name, &state.me.pr_addr)?;
+    let listener = TcpListener::bind(bind_sa).await?;
+    state
+        .push_event(format!("[PR] listening on {}", state.me.pr_addr))
+        .await;
+
+    loop {
+        let (mut sock, src) = listener.accept().await?;
+        let st = state.clone();
+        tokio::spawn(async move {
+            let r = async {
+                let msg = pr_recv(&mut sock).await?;
+                match msg {
+                    PeerReviewMsg::Ping => {
+                        pr_send(&mut sock, &PeerReviewMsg::Pong).await?;
+                    }
+
+                    PeerReviewMsg::Commitment(c) => {
+                        *st.pr_commit_recv.lock().await += 1;
+
+                        if st.cluster.is_witness(&st.me_name) {
+                            let vk = st
+                                .vk_for_node_id(c.node_id)
+                                .ok_or_else(|| anyhow::anyhow!("unknown node_id {}", c.node_id))?;
+
+                            if c.verify(&vk).is_ok() {
+                                let mut ws = st.witness_store.lock().await;
+                                ws.commits.entry(c.node_id).or_default().push(c.clone());
+                            }
+                        }
+                        pr_send(&mut sock, &PeerReviewMsg::Ack).await?;
+                    }
+
+                    PeerReviewMsg::Challenge {
+                        node_id,
+                        from_seq,
+                        to_seq,
+                        ..
+                    } => {
+                        let lines = {
+                            let lg = st.logger.lock().await;
+                            lg.read_log_window(from_seq, to_seq)?
+                        };
+                        pr_send(&mut sock, &PeerReviewMsg::LogSlice { node_id, lines }).await?;
+                    }
+
+                    PeerReviewMsg::WitnessQuery { node_id } => {
+                        let commits = if st.cluster.is_witness(&st.me_name) {
+                            let ws = st.witness_store.lock().await;
+                            ws.commits.get(&node_id).cloned().unwrap_or_default()
+                        } else {
+                            vec![]
+                        };
+                        pr_send(&mut sock, &PeerReviewMsg::WitnessReply { node_id, commits })
+                            .await?;
+                    }
+
+                    _ => {
+                        pr_send(&mut sock, &PeerReviewMsg::Ack).await?;
+                    }
+                }
+                Result::<()>::Ok(())
+            }
+            .await;
+
+            if let Err(e) = r {
+                let _ = st
+                    .push_event(format!("[PR] handler error from {src}: {e:#}"))
+                    .await;
+            }
+        });
+    }
+}
+
+/// --------------------- APP SERVER (TCP) ---------------------
+async fn app_server_task(state: AppState) -> Result<()> {
+    let bind_sa = bind_addr_from(&state.me_name, &state.me.app_addr)?;
+    let listener = TcpListener::bind(bind_sa).await?;
+    state
+        .push_event(format!("[APP] listening on {}", state.me.app_addr))
+        .await;
+
+    loop {
+        let (mut sock, _) = listener.accept().await?;
+        let st = state.clone();
+        tokio::spawn(async move {
+            let r = async {
+                let msg = app_recv(&mut sock).await?;
+
+                // Fault: drop/omit all messages from some sender
+                if let Some(drop_from) = &st.fault.drop_from {
+                    if &msg.from == drop_from {
+                        st.push_event(format!(
+                            "[APP][FAULT] drop_from={} dropped msg_id={}",
+                            drop_from, msg.msg_id
+                        ))
+                        .await;
+
+                        // log explicit DROP (optional)
+                        st.log_kv(
+                            "DROP",
+                            format!(
+                                "ts={} msg_id={} from={} to={}",
+                                now_ms(),
+                                msg.msg_id,
+                                msg.from,
+                                msg.to
+                            ),
+                        )
+                        .await;
+
+                        return Result::<()>::Ok(());
+                    }
+                }
+
+                *st.recv_total.lock().await += 1;
+
+                // Log RECV + DELIVER
+                st.log_kv(
+                    "RECV",
+                    format!(
+                        "ts={} msg_id={} from={} to={} text_hash={}",
+                        msg.ts_ms,
+                        msg.msg_id,
+                        msg.from,
+                        msg.to,
+                        hex::encode(sha256_32(msg.text.as_bytes()))
+                    ),
+                )
+                .await;
+
+                st.log_kv(
+                    "DELIVER",
+                    format!(
+                        "ts={} msg_id={} from={} to={}",
+                        now_ms(),
+                        msg.msg_id,
+                        msg.from,
+                        msg.to
+                    ),
+                )
+                .await;
+
+                st.push_event(format!("[APP] recv msg_id={} from={}", msg.msg_id, msg.from))
+                    .await;
+
+                Ok(())
+            }
+            .await;
+
+            if let Err(e) = r {
+                let _ = st
+                    .push_event(format!("[APP] server handler error: {e:#}"))
+                    .await;
+            }
+        });
+    }
+}
+
+/// Fault: forge fake RECV without a matching SEND
+async fn forge_recv_task(state: AppState) -> Result<()> {
+    let mut tick = time::interval(Duration::from_secs(4));
+    loop {
+        tick.tick().await;
+        let Some(from) = state.fault.forge_recv_from.clone() else { continue };
+
+        let fake_id = format!("FAKE-{}-{}", state.me_name, now_ms());
+        state
+            .log_kv(
+                "RECV",
+                format!(
+                    "ts={} msg_id={} from={} to={} text_hash={}",
+                    now_ms(),
+                    fake_id,
+                    from,
+                    state.me_name,
+                    hex::encode([0u8; 32])
+                ),
+            )
+            .await;
+
+        state
+            .push_event(format!(
+                "[APP][FAULT] forged RECV msg_id={} from={}",
+                fake_id, from
+            ))
+            .await;
+    }
+}
+
+#[derive(Serialize)]
+struct Stats {
+    me: String,
+    is_witness: bool,
+    recv_total: u64,
+    pr_commit_sent: u64,
+    pr_commit_recv: u64,
+    last_events: Vec<String>,
+    fault: String,
+}
+
+async fn http_stats(State(st): State<AppState>) -> Json<Stats> {
+    let ev = st.events.lock().await;
+    let last_events = ev.iter().take(12).cloned().collect::<Vec<_>>();
+    Json(Stats {
+        me: st.me_name.clone(),
+        is_witness: st.cluster.is_witness(&st.me_name),
+        recv_total: *st.recv_total.lock().await,
+        pr_commit_sent: *st.pr_commit_sent.lock().await,
+        pr_commit_recv: *st.pr_commit_recv.lock().await,
+        last_events,
+        fault: format!(
+            "equivocate_head={} drop_from={:?} forge_recv_from={:?}",
+            st.fault.equivocate_head, st.fault.drop_from, st.fault.forge_recv_from
+        ),
+    })
+}
+
+#[derive(Deserialize)]
+struct PublishTextReq {
+    text: String,
+}
+
+#[derive(Serialize)]
+struct PublishTextResp {
+    ok: bool,
+    msg_id: String,
+}
+
+async fn http_publish_text(
+    State(st): State<AppState>,
+    Json(req): Json<PublishTextReq>,
+) -> Json<PublishTextResp> {
+    let msg_id = format!("{}-txt-{}", st.me_name, now_ms());
+    let ts = now_ms();
+    let line = format!("APP_TEXT id={msg_id} ts={ts} {}", req.text);
+
+    {
+        let mut lg = st.logger.lock().await;
+        let hash32 = sha256_32(line.as_bytes());
+        let _ = lg.log_app("PUBLISH", None, msg_id.clone(), hash32, ts);
+    }
+
+    st.push_event(format!("[APP] publish_text id={msg_id}"))
+        .await;
+
+    let (seq, head_hash) = {
+        let lg = st.logger.lock().await;
+        (lg.seq(), lg.prev_hash32())
+    };
+    let c = make_commitment_signed(&st, "APP_EVENT", seq, head_hash).await;
+    send_commitment_to_witnesses(&st, c).await;
+
+    Json(PublishTextResp { ok: true, msg_id })
+}
+
+#[derive(Deserialize)]
+struct SendTextReq {
+    to: String,   // node name
+    text: String,
+}
+
+#[derive(Serialize)]
+struct SendTextResp {
+    ok: bool,
+    msg_id: String,
+}
+
+/// Generate a SEND, send over APP TCP to dest, and rely on dest to log RECV/DELIVER.
+async fn http_send_text(
+    State(st): State<AppState>,
+    Json(req): Json<SendTextReq>,
+) -> Json<SendTextResp> {
+    let to_node = st
+        .cluster
+        .find_by_name(&req.to)
+        .cloned()
+        .unwrap_or_else(|| st.me.clone());
+
+    let msg_id = format!("{}->{}-{}", st.me_name, req.to, now_ms());
+    let ts = now_ms();
+
+    // Log SEND (payload parseable)
+    st.log_kv(
+        "SEND",
         format!(
-            "[boot] me={} app={} pr={}",
-            state.cfg.my_name, state.cfg.app_addr, state.cfg.pr_addr
+            "ts={} msg_id={} from={} to={} text_hash={}",
+            ts,
+            msg_id,
+            st.me_name,
+            req.to,
+            hex::encode(sha256_32(req.text.as_bytes()))
         ),
     )
     .await;
 
-    // tasks
-    let t_udp: JoinHandle<Result<()>> = tokio::spawn(udp_listener_task(state.clone()));
-    let t_pr: JoinHandle<Result<()>> = tokio::spawn(pr_tcp_listener_task(state.clone()));
-    let t_hb: JoinHandle<Result<()>> = tokio::spawn(heartbeat_task(state.clone()));
-
-    let t_http: Option<JoinHandle<Result<()>>> = if args.http {
-        Some(tokio::spawn(run_http_server(state.clone())))
-    } else {
-        None
+    // Send to destination
+    let app_msg = AppMsg {
+        from: st.me_name.clone(),
+        to: req.to.clone(),
+        msg_id: msg_id.clone(),
+        ts_ms: ts,
+        text: req.text,
     };
 
-    // wait ctrl+c
-    tokio::signal::ctrl_c().await.ok();
-    push_event(&state, "[shutdown] ctrl_c received").await;
+    let mut sock = match tcp_connect(&to_node.app_addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            st.push_event(format!("[APP] send connect failed: {e:#}"))
+                .await;
+            return Json(SendTextResp { ok: false, msg_id });
+        }
+    };
 
-    t_udp.abort();
-    t_pr.abort();
-    t_hb.abort();
-    if let Some(t) = t_http {
-        t.abort();
+    if let Err(e) = app_send(&mut sock, &app_msg).await {
+        st.push_event(format!("[APP] send failed: {e:#}")).await;
+        return Json(SendTextResp { ok: false, msg_id });
+    }
+
+    st.push_event(format!("[APP] sent msg_id={} to={}", msg_id, req.to))
+        .await;
+
+    // Send authenticator reflecting new head
+    let (seq, head_hash) = {
+        let lg = st.logger.lock().await;
+        (lg.seq(), lg.prev_hash32())
+    };
+    let c = make_commitment_signed(&st, "APP_EVENT", seq, head_hash).await;
+    send_commitment_to_witnesses(&st, c).await;
+
+    Json(SendTextResp { ok: true, msg_id })
+}
+
+#[derive(Deserialize)]
+struct AskWitnessReq {
+    node_name: String,
+    witness_name: String,
+}
+
+async fn http_pr_ask_witness(
+    State(st): State<AppState>,
+    Json(req): Json<AskWitnessReq>,
+) -> Json<serde_json::Value> {
+    let node_id = node_id_from_name(&req.node_name);
+    let w = match st.cluster.find_by_name(&req.witness_name) {
+        Some(n) => n,
+        None => return Json(serde_json::json!({"ok":false,"error":"witness not found"})),
+    };
+
+    let mut stream = match tcp_connect(&w.pr_addr).await {
+        Ok(s) => s,
+        Err(e) => return Json(serde_json::json!({"ok":false,"error":format!("{e:#}")})),
+    };
+
+    let q = PeerReviewMsg::WitnessQuery { node_id };
+    if let Err(e) = pr_send(&mut stream, &q).await {
+        return Json(serde_json::json!({"ok":false,"error":format!("{e:#}")}));
+    }
+
+    let resp = match pr_recv(&mut stream).await {
+        Ok(r) => r,
+        Err(e) => return Json(serde_json::json!({"ok":false,"error":format!("{e:#}")})),
+    };
+
+    match resp {
+        PeerReviewMsg::WitnessReply { commits, .. } => {
+            Json(serde_json::json!({"ok":true,"count":commits.len(),"commits":commits}))
+        }
+        _ => Json(serde_json::json!({"ok":false,"error":"unexpected reply"})),
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    #[derive(clap::Parser, Debug)]
+    #[command(author, version, about)]
+    struct Args {
+        #[arg(long)]
+        name: String,
+
+        #[arg(long, default_value = "configs/docker/cluster.yaml")]
+        cluster: PathBuf,
+
+        #[arg(long, default_value = "peerreview_logs")]
+        log_dir: PathBuf,
+
+        #[arg(long)]
+        http: bool,
+
+        /// fault string: "equivocate_head" or "drop_from=node4" or "forge_recv_from=node4" or combo with commas
+        #[arg(long, default_value = "")]
+        fault: String,
+    }
+
+    let args = Args::parse();
+
+    let cluster = ClusterConfig::from_yaml_file(&args.cluster)
+        .with_context(|| format!("ClusterConfig::from_yaml_file ({:?})", args.cluster))?;
+
+    let me = cluster
+        .find_by_name(&args.name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("node not found in cluster config"))?;
+
+    let me_id = me.id;
+
+    let me_sk_raw = signing_key_from_name(&args.name);
+    let me_vk = me_sk_raw.verifying_key();
+    let me_sk = Arc::new(Mutex::new(me_sk_raw));
+
+    let log_path = args.log_dir.join(&args.name);
+    tokio::fs::create_dir_all(&log_path).await.ok();
+
+    let pr_logger = {
+        let sk = me_sk.lock().await.clone();
+        PrLogger::open(me_id, &log_path, sk).context("Logger::open failed")?
+    };
+
+    let witnesses = cluster
+        .witnesses
+        .iter()
+        .filter_map(|wname| cluster.find_by_name(wname).cloned())
+        .filter(|n| n.name != args.name)
+        .map(|n| Peer {
+            id: n.id,
+            name: n.name.clone(),
+            pr_addr: n.pr_addr.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let fault = parse_fault(&args.fault);
+
+    let state = AppState {
+        me_name: args.name.clone(),
+        me_id,
+        me,
+        cluster,
+        me_sk,
+        me_vk,
+        logger: Arc::new(Mutex::new(pr_logger)),
+        witnesses,
+        witness_store: Arc::new(Mutex::new(WitnessStore::default())),
+        fault: fault.clone(),
+        events: Arc::new(Mutex::new(VecDeque::new())),
+        recv_total: Arc::new(Mutex::new(0)),
+        pr_commit_sent: Arc::new(Mutex::new(0)),
+        pr_commit_recv: Arc::new(Mutex::new(0)),
+    };
+
+    state
+        .push_event(format!(
+            "[BOOT] me={} id={} witness={} fault={}",
+            state.me_name,
+            state.me_id,
+            state.cluster.is_witness(&state.me_name),
+            args.fault
+        ))
+        .await;
+
+    tokio::spawn(pr_server_task(state.clone()));
+    tokio::spawn(pr_commitment_task(state.clone()));
+    tokio::spawn(app_server_task(state.clone()));
+    tokio::spawn(forge_recv_task(state.clone()));
+
+    if args.http {
+        let http_addr = state
+            .me
+            .http_addr
+            .clone()
+            .context("http_addr missing in cluster config for this node")?;
+        let bind_sa: SocketAddr = http_addr.parse().context("parse http_addr")?;
+
+        let app = Router::new()
+            .route("/stats", get(http_stats))
+            .route("/publish_text", post(http_publish_text))
+            .route("/send_text", post(http_send_text))
+            .route("/pr/ask_witness", post(http_pr_ask_witness))
+            .with_state(state.clone());
+
+        println!("[http] listening on http://{bind_sa}");
+        axum::serve(TcpListener::bind(bind_sa).await?, app).await?;
+    } else {
+        loop {
+            time::sleep(Duration::from_secs(3600)).await;
+        }
     }
 
     Ok(())

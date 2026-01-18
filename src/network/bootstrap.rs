@@ -2,41 +2,40 @@ use ed25519_dalek::PublicKey;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::layer::NetworkLayer;
 use crate::types::config::PeersConfig;
 use crate::types::node::NodeId;
 
 pub struct Bootstrap;
 
 impl Bootstrap {
-    /// Connecte le noeud à tous les pairs depuis peers.toml
+    /// Connect to all peers from peers.toml
     ///
-    /// # Stratégie
-    /// - Thread principal : se connecte aux pairs avec ID < node_id (avec retry)
-    /// - Thread d'écoute : accepte toutes les connexions entrantes
-    /// - Attend que toutes les connexions soient établies
+    /// # Strategy
+    /// - Main thread: connects to peers with ID < node_id (with retry)
+    /// - Accept thread: accepts all incoming connections
+    /// - Waits until all connections are established
     ///
     /// # Arguments
-    /// * `node_id` - ID de ce noeud
-    /// * `network` - Arc<Mutex<NetworkLayer>> (thread-safe)
-    /// * `peers_config` - Configuration des pairs depuis peers.toml
-    /// * `timeout_secs` - Timeout pour les connexions TCP
+    /// * `node_id` - ID of this node
+    /// * `listen_addr` - Address to listen on (e.g., "0.0.0.0:5001")
+    /// * `peers_config` - Peer configuration from peers.toml
+    /// * `timeout_secs` - Timeout for TCP connections
     ///
-    /// # Retour
-    /// Liste des (NodeId, PublicKey, Vec<NodeId>) pour chaque pair connecté
+    /// # Returns
+    /// HashMap<NodeId, TcpStream> for all connected peers
     pub fn connect_to_peers(
         node_id: NodeId,
         listen_addr: &str,
-        network: Arc<Mutex<NetworkLayer>>,
         peers_config: &PeersConfig,
         timeout_secs: u64,
-    ) -> Result<Vec<(NodeId, PublicKey, Vec<NodeId>)>, String> {
+    ) -> Result<HashMap<NodeId, TcpStream>, String> {
         let timeout = Duration::from_secs(timeout_secs);
         
-        // Liste des pairs attendus
+        // Expected peers (excluding ourselves)
         let expected_peers: Vec<NodeId> = peers_config
             .peers
             .iter()
@@ -45,82 +44,87 @@ impl Bootstrap {
             .collect();
 
         let expected_count = expected_peers.len();
-        println!("[Bootstrap] Node {} attend {} pairs: {:?}", node_id, expected_count, expected_peers);
+        println!("[Bootstrap] Node {} expecting {} peers: {:?}", node_id, expected_count, expected_peers);
 
+        let connections: Arc<Mutex<HashMap<NodeId, TcpStream>>> = 
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let connected_count = Arc::new(AtomicUsize::new(0));
         let done = Arc::new(AtomicBool::new(false));
 
-        // Thread acceptant les connexions entrantes
+        // Thread accepting incoming connections
         let accept_handle = {
-            let network = Arc::clone(&network);
+            let connections = Arc::clone(&connections);
+            let connected_count = Arc::clone(&connected_count);
             let done = Arc::clone(&done);
 
-            // TODO: Change with arg listen_addr OR network config
-            let listen_addr: SocketAddr = listen_addr.parse().unwrap();
+            let listen_addr: SocketAddr = listen_addr.parse()
+                .map_err(|e| format!("Invalid listen address: {}", e))?;
+            
             let listener = std::net::TcpListener::bind(listen_addr)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format!("Failed to bind listener: {}", e))?;
 
-            listener.set_nonblocking(false)
-                .map_err(|e| e.to_string())?;
+            listener.set_nonblocking(true)
+                .map_err(|e| format!("Failed to set non-blocking: {}", e))?;
 
             std::thread::spawn(move || {
-                println!("[Bootstrap] Thread d'écoute démarré");
-
-                listener.set_nonblocking(true).unwrap();
+                println!("[Bootstrap] Accept thread started");
 
                 while !done.load(Ordering::SeqCst) {
                     match Self::accept_connection_with_handshake(node_id, &listener, timeout) {
                         Ok((peer_id, stream)) => {
-                            let mut net = network.lock().unwrap();
+                            let mut conns = connections.lock().unwrap();
 
-                            if !net.has_peer(peer_id) {
-                                net.add_peer(peer_id, stream);
-                                println!("[Bootstrap] Pair {} connecté (entrant) [{}/{}]", 
-                                    peer_id, net.peer_count(), expected_count);
+                            if !conns.contains_key(&peer_id) {
+                                conns.insert(peer_id, stream);
+                                let count = connected_count.fetch_add(1, Ordering::SeqCst) + 1;
+                                println!("[Bootstrap] Peer {} connected (incoming) [{}/{}]", 
+                                    peer_id, count, expected_count);
                             } else {
-                                println!("[Bootstrap] Pair {} déjà connecté, ignoré", peer_id);
+                                println!("[Bootstrap] Peer {} already connected, ignored", peer_id);
                             }
                         }
                         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(100));
                         }
                         Err(e) => {
-                            eprintln!("[Bootstrap] Erreur acceptation : {}", e);
+                            eprintln!("[Bootstrap] Accept error: {}", e);
                             std::thread::sleep(Duration::from_millis(100));
                         }
                     }
                 }
 
-                println!("[Bootstrap] Thread d'écoute arrêté");
+                println!("[Bootstrap] Accept thread stopped");
             })
         };
 
-        // Connexions sortantes vers les pairs avec ID < node_id (AVEC RETRY)
+        // Outgoing connections to peers with ID < node_id (WITH RETRY)
         let connect_handle = {
-            let network = Arc::clone(&network);
+            let connections = Arc::clone(&connections);
+            let connected_count = Arc::clone(&connected_count);
             let done = Arc::clone(&done);
             let peers_config = peers_config.clone();
             
             std::thread::spawn(move || {
-                println!("[Bootstrap] Thread de connexion sortante démarré");
+                println!("[Bootstrap] Outgoing connection thread started");
                 
                 let start = Instant::now();
-                let mut last_attempt: HashMap<NodeId, Instant> = std::collections::HashMap::new();
+                let mut last_attempt: HashMap<NodeId, Instant> = HashMap::new();
                 const RETRY_AFTER: Duration = Duration::from_secs(2);
 
-                // Continue tant qu'on n'a pas tous les pairs ou timeout
                 while !done.load(Ordering::SeqCst) {
                     if start.elapsed() > timeout {
-                        eprintln!("[Bootstrap] Timeout connexions sortantes");
+                        eprintln!("[Bootstrap] Outgoing connections timeout");
                         break;
                     }
 
                     for peer in peers_config.peers.iter().filter(|p| p.id < node_id) {
-                        // Skip si déjà connecté
-                        if network.lock().unwrap().has_peer(peer.id) {
+                        // Skip if already connected
+                        if connections.lock().unwrap().contains_key(&peer.id) {
                             continue;
                         }
 
-                        // Skip si retentative récente 
+                        // Skip if recent retry
                         let now = Instant::now();
                         let should_retry = last_attempt
                             .get(&peer.id)
@@ -135,78 +139,101 @@ impl Bootstrap {
 
                         match Self::connect_with_handshake(node_id, &peer.address, timeout) {
                             Ok((peer_id, stream)) => {
-                                let mut net = network.lock().unwrap();
+                                let mut conns = connections.lock().unwrap();
 
-                                if !net.has_peer(peer_id) {
-                                    net.add_peer(peer_id, stream);
-                                    println!("[Bootstrap] Pair {} connecté (sortant) [{}/{}]", 
-                                        peer_id, net.peer_count(), expected_count);
+                                if !conns.contains_key(&peer_id) {
+                                    conns.insert(peer_id, stream);
+                                    let count = connected_count.fetch_add(1, Ordering::SeqCst) + 1;
+                                    println!("[Bootstrap] Peer {} connected (outgoing) [{}/{}]", 
+                                        peer_id, count, expected_count);
                                 }
                             }
                             Err(e) => {
                                 eprintln!(
-                                    "[Bootstrap] Tentative de connexion à {} : {} (retry...)",
+                                    "[Bootstrap] Connection attempt to {} failed: {} (retrying...)",
                                     peer.id, e
                                 );
                             }
                         }
                     }
 
-                    // Petit délai entre les tentatives
                     std::thread::sleep(Duration::from_millis(200));
                 }
                 
-                println!("[Bootstrap] Thread de connexion sortante terminé");
+                println!("[Bootstrap] Outgoing connection thread finished");
             })
         };
 
-        // Attendre que toutes les connexions soient établies
+        // Wait for all connections to be established
         let start = Instant::now();
+        let mut last_log = Instant::now();
+        
         loop {
-            let current_count = network.lock().unwrap().peer_count();
+            let current_count = connected_count.load(Ordering::SeqCst);
             
             if current_count >= expected_count {
-                println!("[Bootstrap] Tous les pairs connectés ({}/{})", current_count, expected_count);
+                println!("[Bootstrap] All peers connected ({}/{})", current_count, expected_count);
                 done.store(true, Ordering::SeqCst);
                 break;
             }
 
             if start.elapsed() > timeout {
+                done.store(true, Ordering::SeqCst);
+                let _ = accept_handle.join();
+                let _ = connect_handle.join();
+                
                 return Err(format!(
-                    "Timeout bootstrap: seulement {}/{} pairs connectés après {:?}",
+                    "Bootstrap timeout: only {}/{} peers connected after {:?}",
                     current_count, expected_count, timeout
                 ));
             }
 
-            // Log progression toutes les 2 secondes
-            if start.elapsed().as_secs() % 2 == 0 {
-                println!("[Bootstrap] Progression: {}/{} pairs connectés...", current_count, expected_count);
+            // Log progress every 3 seconds
+            if last_log.elapsed() >= Duration::from_secs(3) {
+                println!("[Bootstrap] Progress: {}/{} peers connected...", current_count, expected_count);
+                last_log = Instant::now();
             }
 
             std::thread::sleep(Duration::from_millis(200));
         }
 
-        // Attendre la fin des threads
+        // Wait for threads to finish
         let _ = accept_handle.join();
         let _ = connect_handle.join();
 
-        // Construire les infos des pairs
+        // Extract connections from Arc<Mutex<>>
+        let connections = Arc::try_unwrap(connections)
+            .map_err(|_| "Failed to unwrap connections Arc")?
+            .into_inner()
+            .map_err(|_| "Failed to unwrap connections Mutex")?;
+
+        println!("[Bootstrap] Complete: {} peers connected", connections.len());
+        Ok(connections)
+    }
+
+    /// Get peer information from config
+    /// 
+    /// Returns Vec<(NodeId, PublicKey, Vec<NodeId>)> for all peers except the given node_id
+    pub fn get_peer_info(
+        node_id: NodeId,
+        peers_config: &PeersConfig,
+    ) -> Result<Vec<(NodeId, PublicKey, Vec<NodeId>)>, String> {
         let mut infos = Vec::new();
+        
         for peer in peers_config.peers.iter().filter(|p| p.id != node_id) {
             let pk = Self::decode_public_key(&peer.public_key)?;
             infos.push((peer.id, pk, peer.witnesses.clone()));
         }
-
-        println!("[Bootstrap] Terminé : {} pairs connectés", infos.len());
+        
         Ok(infos)
     }
 
-    /// Établit une connexion avec handshake
+    /// Establish connection with handshake
     ///
-    /// # Protocole de handshake
-    /// 1. Noeud A initie la connexion avec noeud B
-    /// 2. Noeud A envoie son ID (4 bytes big-endian)
-    /// 3. Noeud B répond avec son ID (4 bytes big-endian)
+    /// # Handshake protocol
+    /// 1. Node A initiates connection to node B
+    /// 2. Node A sends its ID (4 bytes big-endian)
+    /// 3. Node B responds with its ID (4 bytes big-endian)
     fn connect_with_handshake(
         our_id: NodeId,
         address: &str,
@@ -223,11 +250,9 @@ impl Bootstrap {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
 
-        // Envoyer notre ID
         stream.write_all(&our_id.to_be_bytes())?;
         stream.flush()?;
 
-        // Recevoir l'ID du pair
         let mut buf = [0u8; 4];
         stream.read_exact(&mut buf)?;
         let peer_id = u32::from_be_bytes(buf);
@@ -235,12 +260,12 @@ impl Bootstrap {
         Ok((peer_id, stream))
     }
 
-    /// Accepte une connexion avec handshake
+    /// Accept connection with handshake
     ///
-    /// # Protocole de handshake
-    /// 1. Noeud B accepte la connexion
-    /// 2. Noeud B reçoit l'ID du noeud A (4 bytes big-endian)
-    /// 3. Noeud B répond avec son ID (4 bytes big-endian)
+    /// # Handshake protocol
+    /// 1. Node B accepts connection
+    /// 2. Node B receives ID from node A (4 bytes big-endian)
+    /// 3. Node B responds with its ID (4 bytes big-endian)
     fn accept_connection_with_handshake(
         our_id: NodeId,
         listener: &std::net::TcpListener,
@@ -251,19 +276,17 @@ impl Bootstrap {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
 
-        // Recevoir l'ID du pair
         let mut buf = [0u8; 4];
         stream.read_exact(&mut buf)?;
         let peer_id = u32::from_be_bytes(buf);
 
-        // Envoyer notre ID
         stream.write_all(&our_id.to_be_bytes())?;
         stream.flush()?;
 
         Ok((peer_id, stream))
     }
 
-    /// Décode une clé publique depuis base64
+    /// Decode public key from base64
     fn decode_public_key(base64_str: &str) -> Result<PublicKey, String> {
         use base64::{engine::general_purpose, Engine as _};
 

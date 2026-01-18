@@ -2,7 +2,7 @@ use peerreview_rust::journal::Logger;
 use peerreview_rust::network::{Bootstrap, NetworkLayer};
 use peerreview_rust::types::config::{Config, PeersConfig};
 use peerreview_rust::types::messages::PeerReviewMsg;
-use peerreview_rust::types::node::{Node, NodeId};
+use peerreview_rust::types::node::{Node};
 
 use ed25519_dalek::Keypair;
 use rand::rngs::OsRng;
@@ -41,21 +41,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.witnesses.list.clone(),
     )));
 
-    // Network
-    let network = Arc::new(Mutex::new(NetworkLayer::new()?));
-
     // Bootstrap
-    let peer_infos = Bootstrap::connect_to_peers(
+    let connections = Bootstrap::connect_to_peers(
         config.node.id,
-        &config.network.listen_address,
-        Arc::clone(&network),
+        &config.network.listen_address, 
         &peers_config,
-        config.network.connection_timeout_secs,
+        config.network.connection_timeout_secs
     )?;
 
-    let peer_ids = network.lock().unwrap().get_peer_ids();
-
-    // Ajouter les pairs au node
+    // Add peers to the node
+    let peer_infos = Bootstrap::get_peer_info(config.node.id, &peers_config)?;
     {
         let mut node = node.lock().unwrap();
 
@@ -64,25 +59,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let network_layer = Arc::try_unwrap(network)
-        .expect("NetworkLayer has multiple references")
-        .into_inner()
-        .unwrap();
+    // Network layer
+    let network = NetworkLayer::new(connections)?;
 
-    // Démarrage du reactor
-    let (net_sender, reactor_handle) = network_layer
-        .start_event_loop({
-            move |peer_id: NodeId, msg: PeerReviewMsg| {
-                println!(
-                    "[Node {}] Reçu de {} -> {:?}",
-                    config.node.id, peer_id, msg
-                );
-            }
-        })?;
-
-    // Test message
-    // std::thread::sleep(std::time::Duration::from_secs(15));
-
+    // Test send message
     let test_msg = PeerReviewMsg::Send {
         seq: 1,
         prev_hash: [0u8; 32],
@@ -91,12 +71,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         msg: format!("Hello from node {}", config.node.id),
     };
 
-    for peer_id in peer_ids {
+    let peer_ids = network.get_peer_ids();
+    for peer_id in &peer_ids {
         println!("[Node {}] Envoi test → {}", config.node.id, peer_id);
-        net_sender.send_message(peer_id, &test_msg)?;
+        network.send(*peer_id, &test_msg)?;
     }
 
-    let _ = reactor_handle.join().expect("Reactor panicked");
+    let mut count = 0;
+    while count < peer_ids.len() {
+        let (from_peer, msg) = network.recv()?;
+        
+        println!("[Node {}] Received from {} -> {:?}",
+            config.node.id, from_peer, msg);
+        
+        count += 1;
+    }
+
+    // Wait 15s before shutdown
+    std::thread::sleep(std::time::Duration::from_secs(15));
+
+    network.shutdown()?;
 
     Ok(())
 }

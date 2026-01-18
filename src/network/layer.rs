@@ -3,269 +3,325 @@ use mio::net::{TcpStream};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::sync::mpsc::{self, Sender, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use crate::types::messages::PeerReviewMsg;
 use crate::types::node::NodeId;
 
+/// Wake-up poll when the reactor received
+/// a command from mpsc channel.
 const WAKE_TOKEN: Token = Token(usize::MAX);
 
-/// Requête d'envoi de message
-struct SendRequest {
-    peer_id: NodeId,
-    encoded: Vec<u8>,
+/// Connection state of a peer
+struct Connection {
+    token: Token,
+    stream: TcpStream,
+    read_buffer: Vec<u8>,
+    write_buffer: Vec<u8>,
 }
 
-/// Network layer est un wrapper réseau pour gérer
-/// communications TCP avec les noeuds
-/// 
-/// # Architecture
-/// - 1 thread reactor (mio::Poll) : gère tous les I/O non-bloquants
-/// - N threads workers : traitent les messages décodés
-/// 
-/// # Règles de propriété
-/// - SEUL le reactor touche les TcpStream
-/// - Les workers ne voient jamais les sockets
-/// - Les workers reçoivent uniquement (peer_id, message)
-#[derive(Debug)]
+/// Internal commands sent to the reactor
+enum ReactorCommand {
+    Send { peer_id: NodeId, encoded: Vec<u8> },
+    Shutdown,
+}
+
+/// Shared state between users and reactor thread
+struct NetworkState {
+    /// Commands to send to the reactor
+    command_tx: Sender<ReactorCommand>,
+
+    /// Received messages from peers
+    message_rx: Receiver<(NodeId, PeerReviewMsg)>,
+
+    /// Waker to notify reactor of new commands
+    waker: Arc<Waker>,
+
+    /// Current peer list (updated by reactor) 
+    peers: Arc<Mutex<Vec<NodeId>>>,
+}
+
+/// Network layer is a network wrapper for TCP stream peers
 pub struct NetworkLayer {
-    poll: Poll,             // poll évènements I/O
-
-    /// Mapping Token <-> NodeId
-    token_to_peer: HashMap<Token, NodeId>,
-    peer_to_token: HashMap<NodeId, Token>,
-
-    /// Connexions TCP
-    connections: HashMap<Token, TcpStream>,
-
-    /// Buffers de lecture et d'écriture par connexion
-    /// Note: Permet en lecture d'attendre le bon nombre d'octets
-    /// avant de décoder le message.
-    read_buffers: HashMap<Token, Vec<u8>>,
-    write_buffers: HashMap<Token, Vec<u8>>,
-
-    // TODO: Worker thread pool
-    /// Canal pour recevoir les requêtes d'envoi depuis d'autres threads
-    send_rx: Option<Receiver<SendRequest>>,
-
-    /// Prochain token disponible
-    next_token: usize,
+    state: Arc<NetworkState>,
+    reactor_handle: Option<JoinHandle<io::Result<()>>>
 }
 
 impl NetworkLayer {
-    /// Créer une nouvelle couche réseau
-    ///
-    /// # Arguments
-    /// * `listen_addr` - Adresse d'écoute (ex: "0.0.0.0:5001")
-    pub fn new() -> io::Result<Self> {
+    /// Create a new network layer and start reactor thread
+    pub fn new(initial_peers: HashMap<NodeId, std::net::TcpStream>) -> io::Result<Self> {
         let poll = Poll::new()?;
+        let waker = Arc::new(Waker::new(poll.registry(), WAKE_TOKEN)?);
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (message_tx, message_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let peers_clone = Arc::clone(&peers);
+
+        // Copy initial_peers before passing to reactor thread
+        let mut mio_peers = HashMap::new();
+        for (peer_id, stream) in initial_peers {
+            stream.set_nonblocking(true)?;
+            let mio_stream = TcpStream::from_std(stream);
+            mio_peers.insert(peer_id, mio_stream);
+        }
+
+        let handle = thread::spawn(move || {
+            let mut reactor = Reactor {
+                poll,
+                connections: HashMap::new(),
+                token_to_peer: HashMap::new(),
+                command_rx,
+                message_tx,
+                peers: peers_clone,
+                next_token: 0,
+            };
+
+            // Register initial peers
+            for (peer_id, stream) in mio_peers {
+                if let Err(e) = reactor.register_peer(peer_id, stream) {
+                    eprintln!("[Reactor] Failed to register peer {}: {}", peer_id, e);
+                }
+            }
+
+            reactor.run(ready_tx)
+        });
+
+        // Wait for reactor to be ready
+        ready_rx.recv()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Reactor failed to start"))?;
+
+        let state = Arc::new(NetworkState {
+            command_tx,
+            message_rx,
+            waker,
+            peers,
+        });
 
         Ok(Self {
-            poll,
-            token_to_peer: HashMap::new(),
-            peer_to_token: HashMap::new(),
-            connections: HashMap::new(),
-            read_buffers: HashMap::new(),
-            write_buffers: HashMap::new(),
-            send_rx: None,
-            next_token: 0,
+            state,
+            reactor_handle: Some(handle),
         })
     }
-    
-    /// Compte le nombre de pairs connectés
-    pub fn peer_count(&self) -> usize {
-        self.peer_to_token.len()
-    }
-    
-    /// Vérifie si un pair est connecté
-    pub fn has_peer(&self, peer_id: NodeId) -> bool {
-        self.peer_to_token.contains_key(&peer_id)
-    }
-    
-    /// Retourne la liste des IDs de pairs connectés
-    pub fn get_peer_ids(&self) -> Vec<NodeId> {
-        self.peer_to_token.keys().copied().collect()
-    }
 
-    /// Enregistre un nouveau pair
-    /// 
-    /// Note : Appelée apr_s le bootstrap
-    /// 
-    /// IMPORTANT : Cette méthode doit être appelée AVANT start_event_loop()
-    /// 
-    /// # Arguments
-    /// * `peer_id` - ID du pair
-    /// * `stream` - Connexion TCP STANDARD du pair
-    pub fn register_peer(&mut self, peer_id: NodeId, mut stream: TcpStream) -> io::Result<()> {
-        // TODO: Check if peer already added
+    /// Send a message to a peer
+    pub fn send(&self, peer_id: NodeId, msg: &PeerReviewMsg) -> io::Result<()> {
+        let encoded = super::messages::encode(msg)?;
         
-        // stream.set_nodelay(true)?;
-
-        let token = Token(self.next_token);
-        self.next_token += 1;
-
-        self.poll.registry().register(
-            &mut stream,
-            token,
-            Interest::READABLE | Interest::WRITABLE,
-        )?;
-
-        self.token_to_peer.insert(token, peer_id);
-        self.peer_to_token.insert(peer_id, token);
-        self.connections.insert(token, stream);
-        self.read_buffers.insert(token, Vec::new());
-        self.write_buffers.insert(token, Vec::new());
-
-        println!("[NetworkLayer] Pair {} enregistré avec token {:?}", peer_id, token);
+        self.state.command_tx
+            .send(ReactorCommand::Send { peer_id, encoded })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Reactor closed"))?;
+        
+        // Wake the reactor to process immediately
+        let _ = self.state.waker.wake();
         
         Ok(())
     }
-
-    /// Démarre la boucle d'évènement dans un thread
-    /// 
-    /// Cette méthode prend ownership de self et ne retourne un NetworkSender
-    /// pour envoyer des messages depuis d'autres threads.
-    /// 
-    /// # Arguments
-    /// * `callback` - Fonction appelée pour chaque message reçu (1 thread par msg)
-    /// 
-    /// # Retour
-    /// * `NetworkSender` - Interface thread-safe pour envoyer des messages
-    /// * `JoinHandle` - Handle du thread reactor
-    pub fn start_event_loop(
-        mut self,
-        callback: impl Fn(NodeId, PeerReviewMsg) + Send + Sync + 'static
-    ) -> io::Result<(NetworkSender, JoinHandle<io::Result<()>>)> {
-        let mut events = Events::with_capacity(128);
-
-        let callback: Arc<dyn Fn(NodeId, PeerReviewMsg) + Send + Sync> = Arc::new(callback);
-
-        // TODO: Check if useful to clone
-        let (send_tx, send_rx) = mpsc::channel();
-        self.send_rx = Some(send_rx);
-
-        let waker = Arc::new(Waker::new(self.poll.registry(), WAKE_TOKEN)?);
-
-        let sender = NetworkSender { 
-            sender: send_tx,
-            waker: Arc::clone(&waker),
-        };
-
-        println!("[NetworkLayer] Boucle d'événements démarrée");
-
-        // wait the thread to be ready
-        let (ready_tx, ready_rx) = mpsc::channel::<()>();
-
-        let handle = thread::spawn(move || {
-            ready_tx.send(()).expect("Failed to send ready signal");
-            self.run_event_loop(&mut events, callback)
-        });
-
-        ready_rx.recv()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Reactor failed to start"))?;
-        
-        // TODO: Replace by initial pool before ready_tx OR pass it to run_event_loop
-        // std::thread::sleep(std::time::Duration::from_millis(50));   // ensure poll started in run_event_loop
     
-        println!("[NetworkLayer] Event loop is ready");
-
-        Ok((sender, handle))
+    /// Receive a message (blocking)
+    /// 
+    /// Returns (peer_id, message) or error if reactor is closed
+    pub fn recv(&self) -> io::Result<(NodeId, PeerReviewMsg)> {
+        self.state.message_rx.recv()
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Reactor closed"))
     }
+    
+    /// Try to receive a message (non-blocking)
+    /// 
+    /// Returns Some((peer_id, message)) if a message is available, None otherwise
+    pub fn try_recv(&self) -> io::Result<Option<(NodeId, PeerReviewMsg)>> {
+        match self.state.message_rx.try_recv() {
+            Ok(msg) => Ok(Some(msg)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "Reactor closed"))
+            }
+        }
+    }
+    
+    /// Get the number of connected peers
+    pub fn peer_count(&self) -> usize {
+        self.state.peers.lock().unwrap().len()
+    }
+    
+    /// Check if a specific peer is connected
+    pub fn has_peer(&self, peer_id: NodeId) -> bool {
+        self.state.peers.lock().unwrap().contains(&peer_id)
+    }
+    
+    /// Get list of all connected peer IDs
+    pub fn get_peer_ids(&self) -> Vec<NodeId> {
+        self.state.peers.lock().unwrap().clone()
+    }
+    
+    /// Shutdown the network layer gracefully
+    pub fn shutdown(mut self) -> io::Result<()> {
+        let _ = self.state.command_tx.send(ReactorCommand::Shutdown);
+        let _ = self.state.waker.wake();
+        
+        if let Some(handle) = self.reactor_handle.take() {
+            handle.join()
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "Reactor panicked"))?
+        } else {
+            Ok(())
+        }
+    }
+}
 
-    /// Boucle principale du reactor
-    fn run_event_loop(
-        &mut self,
-        events: &mut Events,
-        callback: Arc<dyn Fn(NodeId, PeerReviewMsg) + Send + Sync>,
-    ) -> io::Result<()> {
+impl Drop for NetworkLayer {
+    fn drop(&mut self) {
+        let _ = self.state.command_tx.send(ReactorCommand::Shutdown);
+        let _ = self.state.waker.wake();
+    }
+}
+
+struct Reactor {
+    poll: Poll,
+    connections: HashMap<NodeId, Connection>,
+    token_to_peer: HashMap<Token, NodeId>,
+    command_rx: Receiver<ReactorCommand>,
+    message_tx: Sender<(NodeId, PeerReviewMsg)>,
+    peers: Arc<Mutex<Vec<NodeId>>>,
+    next_token: usize,
+}
+
+impl Reactor {
+    fn run(mut self, ready_signal: Sender<()>) -> io::Result<()> {
+        let mut events = Events::with_capacity(128);
+        let mut should_shutdown = false;
+
+        // Initial poll
+        // self.poll.poll(&mut events, Some(Duration::from_millis(0)))?;
+
+        // Signal that the reactor is ready to poll
+        let _ = ready_signal.send(());
+
         loop {
-            self.poll.poll(events, None)?;
+            self.poll.poll(&mut events, None)?;
 
-            // Traiter les requêtes d'envoi en attente (non-bloquant)
-            let mut send_requests = Vec::new();
-            if let Some(ref rx) = self.send_rx {
-                while let Ok(req) = rx.try_recv() {
-                    send_requests.push(req);
+            while let Ok(cmd) = self.command_rx.try_recv() {
+                match cmd {
+                    ReactorCommand::Send { peer_id, encoded } => {
+                        if let Err(e) = self.queue_send(peer_id, encoded) {
+                            eprintln!("[Reactor] Send error for peer {}: {}", peer_id, e);
+                        }
+                    }
+                    ReactorCommand::Shutdown => {
+                        should_shutdown = true;
+                        break;
+                    }
                 }
             }
 
-            for req in send_requests {
-                if let Err(e) = self.queue_send(req.peer_id, req.encoded) {
-                        eprintln!("[NetworkLayer] Erreur queue_send pour {}: {}", req.peer_id, e);
-                }
+            if should_shutdown {
+                println!("[Reactor] Shutting down");
+                break;
             }
 
-            // Traiter les évènements I/O
             for event in events.iter() {
                 match event.token() {
-                    WAKE_TOKEN => continue,
+                    WAKE_TOKEN => {
+                        // Just a wake-up call
+                        continue;
+                    }
                     token => {
                         if event.is_readable() {
-                            if let Err(e) = self.handle_readable(token, Arc::clone(&callback)) {
-                                eprintln!("[NetworkLayer] Erreur lecture token {:?}: {}", token, e);
-                                self.drop_peer(token)?;
+                            if let Err(e) = self.handle_readable(token) {
+                                eprintln!("[Reactor] Read error on {:?}: {}", token, e);
+                                let _ = self.drop_peer(token);
                             }
                         }
-
+                        
                         if event.is_writable() {
                             if let Err(e) = self.handle_writable(token) {
-                                eprintln!("[NetworkLayer] Erreur écriture token {:?}: {}", token, e);
-                                self.drop_peer(token)?;
+                                eprintln!("[Reactor] Write error on {:?}: {}", token, e);
+                                let _ = self.drop_peer(token);
                             }
                         }
                     }
                 }
             }
         }
-    }
-
-    /// Ajoute des données au buffer d'écriture d'un pair
-    fn queue_send(&mut self, peer_id: NodeId, encoded: Vec<u8>) -> io::Result<()> {    
-        let token = self.peer_to_token.get(&peer_id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Pair {} non connecté", peer_id)))?;
-        
-        let write_buffer = self.write_buffers.get_mut(token).unwrap();
-        write_buffer.extend_from_slice(&encoded);
-        
-        // Essayer d'écrire immédiatement
-        self.handle_writable(*token)?;
 
         Ok(())
     }
 
-    /// Gère les évènements de lecture (décode message)
-    fn handle_readable(
-        &mut self,
-        token: Token,
-        callback: Arc<dyn Fn(NodeId, PeerReviewMsg) + Send + Sync>,
-    ) -> io::Result<()> {
-        let peer_id = match self.token_to_peer.get(&token) {
-            Some(&id) => id,
-            None => return Ok(()),  // Pair déjà supprimé
+    fn register_peer(&mut self, peer_id: NodeId, mut stream: TcpStream) -> io::Result<()> {
+        let token = Token(self.next_token);
+        self.next_token += 1;
+
+        self.poll.registry().register(
+            &mut stream,
+            token,
+            Interest::READABLE | Interest::WRITABLE
+        )?;
+
+        let conn = Connection {
+            token,
+            stream,
+            read_buffer: Vec::new(),
+            write_buffer: Vec::new(),
         };
 
-        let stream = self.connections.get_mut(&token).unwrap();
-        let buffer = self.read_buffers.get_mut(&token).unwrap();
+        self.connections.insert(peer_id, conn);
+        self.token_to_peer.insert(token, peer_id);
+
+        let mut peers = self.peers.lock().unwrap();
+        if !peers.contains(&peer_id) {
+            peers.push(peer_id);
+        }
+
+        println!("[Reactor] Peer {} registered with token {:?}", peer_id, token);
+        
+        Ok(())
+    }
+
+    fn queue_send(&mut self, peer_id: NodeId, encoded: Vec<u8>) -> io::Result<()> {
+        let token = {
+            let conn = self.connections.get_mut(&peer_id)
+                .ok_or_else(|| io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Peer {} not connected", peer_id)
+                ))?;
+
+            conn.write_buffer.extend_from_slice(&encoded);
+            conn.token
+        };
+
+        self.handle_writable(token)?;
+
+        Ok(())
+    }
+
+    fn handle_readable(&mut self, token: Token) -> io::Result<()> {
+        let peer_id = *self.token_to_peer.get(&token)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Token not found"))?;
+
+        let conn = self.connections.get_mut(&peer_id).unwrap();
 
         let mut temp = [0u8; 4096];
-        
+
         loop {
-            match stream.read(&mut temp) {
+            match conn.stream.read(&mut temp) {
                 Ok(0) => {
-                    println!("[NetworkLayer] Peer {} disconnected", peer_id);
-                    self.drop_peer(token)?;
-                    return Ok(());
+                    println!("[Reactor] Peer {} disconnected", peer_id);
+                    return self.drop_peer(token);
                 }
                 Ok(n) => {
-                    // TODO: Here, maybe send it to a worker
-                    buffer.extend_from_slice(&temp[..n]);
+                    conn.read_buffer.extend_from_slice(&temp[..n]);
 
-                    while let Some(msg) = Self::try_decode_message(buffer)? {
-                        let cb = Arc::clone(&callback);
-                        thread::spawn(move || {
-                            cb(peer_id, msg);
-                        });
+                    while let Some(msg) = super::messages::try_decode(&mut conn.read_buffer)? {
+                        // Send to the user via channel
+                        if self.message_tx.send((peer_id, msg)).is_err() {
+                            // User dropped the receiver, might as well stop
+                            return Err(io::Error::new(
+                                io::ErrorKind::BrokenPipe,
+                                "Message receiver dropped"
+                            ));
+                        }
                     }
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -277,155 +333,51 @@ impl NetworkLayer {
         Ok(())
     }
 
-    /// Gérer les évènements d'écriture
     fn handle_writable(&mut self, token: Token) -> io::Result<()> {
-        let write_buffer = match self.write_buffers.get_mut(&token) {
-            Some(buf) => buf,
-            None => {
-                return Ok(())
-            }
+        let peer_id = match self.token_to_peer.get(&token) {
+            Some(&id) => id,
+            None => return Ok(()),
         };
-
-        if write_buffer.is_empty() {
+        
+        let conn = self.connections.get_mut(&peer_id).unwrap();
+        
+        if conn.write_buffer.is_empty() {
             return Ok(());
         }
-
-        let stream = self.connections.get_mut(&token).unwrap();
-
+        
         loop {
-            match stream.write(write_buffer) {
+            match conn.stream.write(&conn.write_buffer) {
                 Ok(0) => {
                     return Err(io::Error::new(io::ErrorKind::WriteZero, "Write returned 0"));
                 }
                 Ok(n) => {
-                    // Retire les bytes écrits
-                    write_buffer.drain(..n);
-
-                    if write_buffer.is_empty() {
+                    conn.write_buffer.drain(..n);
+                    
+                    if conn.write_buffer.is_empty() {
                         break;
                     }
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    break
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
-                    continue
-                }
-                Err(e) => {
-                    return Err(e)
-                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
             }
         }
-
+        
         Ok(())
     }
 
-    /// Décode un message depuis le buffer (protocole: 4 bytes len + payload)
-    fn try_decode_message(buffer: &mut Vec<u8>) -> io::Result<Option<PeerReviewMsg>> {
-        const BYTE_SIZE_LEN: usize = 4;
-
-        // Besoin de 4 bytes pour la longueur
-        if buffer.len() < BYTE_SIZE_LEN {
-            return Ok(None);
-        }
-
-        // Note : longueur en big-endian
-        let len = u32::from_be_bytes(
-            [buffer[0], buffer[1], buffer[2], buffer[3]]
-        ) as usize;
-
-        // TODO: Add len max size
-
-        if buffer.len() < BYTE_SIZE_LEN + len {
-            return Ok(None);
-        }
-
-        let payload = buffer[BYTE_SIZE_LEN..BYTE_SIZE_LEN+len].to_vec();
-        buffer.drain(..BYTE_SIZE_LEN+len);
-
-        let (msg, _) = bincode::decode_from_slice(&payload, bincode::config::standard())
-            .map_err(|e| io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Erreur de désérialisation: {}", e),
-            )
-        )?;
-
-        Ok(Some(msg))
-    }
-
-    /// Supprime un pair (appelé en cas de déconnexion ou erreur)
     fn drop_peer(&mut self, token: Token) -> io::Result<()> {
         if let Some(peer_id) = self.token_to_peer.remove(&token) {
-            self.peer_to_token.remove(&peer_id);
-            
-            // Désenregistrer du poll
-            if let Some(mut stream) = self.connections.remove(&token) {
-                let _ = self.poll.registry().deregister(&mut stream);
+            if let Some(mut conn) = self.connections.remove(&peer_id) {
+                let _ = self.poll.registry().deregister(&mut conn.stream);
             }
 
-            self.read_buffers.remove(&token);
-            self.write_buffers.remove(&token);
+            let mut peers = self.peers.lock().unwrap();
+            peers.retain(|&id| id != peer_id);
             
-            println!("[NetworkLayer] Pair {} supprimé (token {:?})", peer_id, token);
+            println!("[Reactor] Peer {} removed (token {:?})", peer_id, token);
         }
         
         Ok(())
-    }
-}
-
-/// API d'envoi de messages (thread-safe via canal)
-/// 
-/// Cette structure peut être clonée et partagée entre threads
-#[derive(Clone)]
-pub struct NetworkSender {
-    sender: Sender<SendRequest>,
-    waker: Arc<Waker>,
-}
-
-impl NetworkSender {
-    /// Envoie un message à un pair
-    /// 
-    /// Cette méthode est thread-safe et peut être appelée depuis n'importe quel thread
-    /// (y compris depuis le callback de réception).
-    /// Le message sera mis en queue et envoyé par le reactor.
-    pub fn send_message(&self, peer_id: NodeId, msg: &PeerReviewMsg) -> io::Result<()> {
-        // Encoder le message
-        let payload = bincode::encode_to_vec(msg, bincode::config::standard())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Encodage: {}", e)))?;
-        
-        // Framing: 4 bytes len + payload
-        let len = payload.len() as u32;
-        let mut encoded = Vec::with_capacity(4 + payload.len());
-        encoded.extend_from_slice(&len.to_be_bytes());
-        encoded.extend_from_slice(&payload);
-        
-        // Envoyer au reactor
-        self.sender.send(SendRequest { peer_id, encoded })
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Reactor fermé"))?;
-        
-        self.waker
-            .wake()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Wake failed"))?;
-
-        Ok(())
-    }
-}
-
-// TODO: Remove
-/// Bootstrap helper (temporaire)
-impl NetworkLayer {
-    /// Ajoute un pair
-    /// 
-    /// DEPRECATED : Utiliser register_peer() à la place
-    pub fn add_peer(&mut self, peer_id: NodeId, stream: std::net::TcpStream) {
-        println!("[NetworkLayer] Pair {} ajouté ({})", peer_id, 
-            stream.peer_addr().unwrap());
-        
-        // Convertir std::net::TcpStream en mio::net::TcpStream
-        stream.set_nonblocking(true).unwrap();
-        let mio_stream = TcpStream::from_std(stream);
-        
-        // Enregistrer le pair
-        self.register_peer(peer_id, mio_stream).unwrap();
     }
 }

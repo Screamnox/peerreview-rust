@@ -32,6 +32,8 @@ use tokio::{
     time,
 };
 
+const CHECKPOINT_EVERY: u64 = 10;
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -113,6 +115,25 @@ struct WitnessStore {
     commits: HashMap<NodeId, Vec<Commitment>>,
 }
 
+
+/// --------------------- Evidence Transfer (minimal) ---------------------
+/// In the SOSP paper, an "evidence" can be transferred so that other nodes can
+/// store/inspect it later. Here we keep a minimal, demo-friendly structure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EvidenceRecord {
+    from: String,
+    about: String,
+    kind: String,
+    ts_ms: u64,
+    payload: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EvidenceAck {
+    ok: bool,
+    count: usize,
+}
+
 #[derive(Clone, Default)]
 struct FaultConfig {
     equivocate_head: bool,
@@ -152,7 +173,16 @@ struct AppState {
     logger: Arc<Mutex<PrLogger>>,
     witnesses: Vec<Peer>,
     witness_store: Arc<Mutex<WitnessStore>>,
+
+    /// Evidence store (received via HTTP transfer)
+    evidence_store: Arc<Mutex<Vec<EvidenceRecord>>>,
     fault: FaultConfig,
+
+    // ---- Minimal PeerReview state machine S_i (deterministic replay) ----
+    // We keep only a deterministic hash of the application state.
+    // Updated only on DELIVER(msg_id) so that audits can replay S_i.
+    app_state_hash: Arc<Mutex<[u8; 32]>>,
+    deliver_count: Arc<Mutex<u64>>,
 
     events: Arc<Mutex<VecDeque<String>>>,
 
@@ -179,6 +209,52 @@ impl AppState {
     async fn log_kv(&self, kind: &str, payload: String) {
         let mut lg = self.logger.lock().await;
         let _ = lg.log_event(kind, None, payload);
+    }
+
+
+    /// Deterministic state-machine transition for S_i: apply DELIVER(msg_id).
+    /// app_state_hash = SHA256(app_state_hash || msg_id_bytes).
+    /// We also log STATE_HASH after each DELIVER, and CHECKPOINT every CHECKPOINT_EVERY deliveries.
+    async fn update_state_after_deliver(&self, msg_id: &str) {
+        let mut count = self.deliver_count.lock().await;
+        *count += 1;
+        let deliver_idx = *count;
+
+        let mut h = self.app_state_hash.lock().await;
+        let mut hasher = Sha256::new();
+        hasher.update(&*h);
+        hasher.update(msg_id.as_bytes());
+        let out = hasher.finalize();
+        let mut newh = [0u8; 32];
+        newh.copy_from_slice(&out[..]);
+        *h = newh;
+
+        // Always log state hash for replay verification
+        drop(h);
+        self.log_kv(
+            "STATE_HASH",
+            format!(
+                "ts={} deliver_idx={} state_hash={} msg_id={}",
+                now_ms(),
+                deliver_idx,
+                hex::encode(newh),
+                msg_id
+            ),
+        )
+        .await;
+
+        if deliver_idx % CHECKPOINT_EVERY == 0 {
+            self.log_kv(
+                "CHECKPOINT",
+                format!(
+                    "ts={} deliver_idx={} state_hash={}",
+                    now_ms(),
+                    deliver_idx,
+                    hex::encode(newh)
+                ),
+            )
+            .await;
+        }
     }
 }
 
@@ -414,6 +490,9 @@ async fn app_server_task(state: AppState) -> Result<()> {
                 )
                 .await;
 
+                // Update deterministic state machine (S_i) after DELIVER
+                st.update_state_after_deliver(&msg.msg_id).await;
+
                 st.push_event(format!("[APP] recv msg_id={} from={}", msg.msg_id, msg.from))
                     .await;
 
@@ -643,6 +722,45 @@ async fn http_pr_ask_witness(
     }
 }
 
+/// POST /pr/evidence_transfer
+/// Minimal Evidence Transfer: store evidence on a node for later inspection.
+async fn http_pr_evidence_transfer(
+    State(st): State<AppState>,
+    Json(ev): Json<EvidenceRecord>,
+) -> Json<EvidenceAck> {
+    let mut store = st.evidence_store.lock().await;
+    store.push(ev);
+
+    // keep bounded so demo doesn't grow forever
+    if store.len() > 500 {
+        let drain = store.len() - 500;
+        store.drain(0..drain);
+    }
+
+    let count = store.len();
+    let (kind, about, from) = store
+        .last()
+        .map(|x| (x.kind.clone(), x.about.clone(), x.from.clone()))
+        .unwrap_or_default();
+    drop(store);
+
+    st.push_event(format!(
+        "[EVIDENCE] stored kind={} about={} from={}",
+        kind, about, from
+    ))
+    .await;
+
+    Json(EvidenceAck { ok: true, count })
+}
+
+/// GET /pr/evidence
+/// Returns all stored evidences (demo-friendly).
+async fn http_pr_evidence_list(State(st): State<AppState>) -> Json<Vec<EvidenceRecord>> {
+    let store = st.evidence_store.lock().await;
+    Json(store.clone())
+}
+
+
 #[tokio::main]
 async fn main() -> Result<()> {
     #[derive(clap::Parser, Debug)]
@@ -713,7 +831,13 @@ async fn main() -> Result<()> {
         logger: Arc::new(Mutex::new(pr_logger)),
         witnesses,
         witness_store: Arc::new(Mutex::new(WitnessStore::default())),
+
+        evidence_store: Arc::new(Mutex::new(Vec::new())),
         fault: fault.clone(),
+
+        app_state_hash: Arc::new(Mutex::new([0u8; 32])),
+        deliver_count: Arc::new(Mutex::new(0)),
+
         events: Arc::new(Mutex::new(VecDeque::new())),
         recv_total: Arc::new(Mutex::new(0)),
         pr_commit_sent: Arc::new(Mutex::new(0)),
@@ -748,6 +872,8 @@ async fn main() -> Result<()> {
             .route("/publish_text", post(http_publish_text))
             .route("/send_text", post(http_send_text))
             .route("/pr/ask_witness", post(http_pr_ask_witness))
+            .route("/pr/evidence_transfer", post(http_pr_evidence_transfer))
+            .route("/pr/evidence", get(http_pr_evidence_list))
             .with_state(state.clone());
 
         println!("[http] listening on http://{bind_sa}");

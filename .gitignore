@@ -14,3 +14,18 @@
 peerreview_logs/
 peerreview_logs_*/
 tmp/
+
+# Python / venv
+.venv/
+**/.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Python envs
+.env
+
+# Jupyter / misc
+.ipynb_checkpoints/
+Thumbs.db

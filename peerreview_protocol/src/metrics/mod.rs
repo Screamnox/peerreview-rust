@@ -18,10 +18,12 @@ use crate::types::NodeId;
 ///
 /// Content Delivery Rate = % de nœuds ayant reçu le contenu
 /// Selon le PDF: "Pourcentage de chunks reçus par chaque nœud"
+/// Note: Le nœud source est exclu du calcul car il est l'émetteur, pas un destinataire
 #[derive(Debug, Clone, Default)]
 pub struct ContentDeliveryMetrics {
     pub total_chunks_sent: usize,
     pub total_nodes: usize,
+    pub source_node: Option<NodeId>,  // Nœud source à exclure du calcul
     pub chunks_received_per_node: HashMap<NodeId, usize>,
     pub delivery_rate_per_node: HashMap<NodeId, f64>,
     pub avg_delivery_rate: f64,
@@ -36,6 +38,10 @@ impl ContentDeliveryMetrics {
 
     pub fn set_total_nodes(&mut self, total: usize) {
         self.total_nodes = total;
+    }
+
+    pub fn set_source_node(&mut self, source: NodeId) {
+        self.source_node = Some(source);
     }
 
     pub fn record_send(&mut self) {
@@ -64,13 +70,20 @@ impl ContentDeliveryMetrics {
             rates.push(rate);
         }
 
-        // Avg delivery rate = % de nœuds ayant reçu tous les chunks
-        if self.total_nodes > 0 {
+        // Avg delivery rate = % de nœuds destinataires ayant reçu tous les chunks
+        // Le nœud source est exclu car il est l'émetteur, pas un destinataire
+        let destination_nodes = if self.source_node.is_some() {
+            self.total_nodes.saturating_sub(1)  // Exclure le source
+        } else {
+            self.total_nodes
+        };
+
+        if destination_nodes > 0 {
             let nodes_with_full_delivery = self.chunks_received_per_node
                 .values()
                 .filter(|&&r| r >= self.total_chunks_sent)
                 .count();
-            self.avg_delivery_rate = (nodes_with_full_delivery as f64 / self.total_nodes as f64) * 100.0;
+            self.avg_delivery_rate = (nodes_with_full_delivery as f64 / destination_nodes as f64) * 100.0;
         } else if !rates.is_empty() {
             self.avg_delivery_rate = rates.iter().sum::<f64>() / rates.len() as f64;
         }

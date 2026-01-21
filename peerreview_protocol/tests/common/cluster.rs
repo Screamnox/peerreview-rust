@@ -221,6 +221,7 @@ impl TestCluster {
     /// Publie un message depuis le nœud source
     pub fn publish(&mut self, msg_id: &str, content: &[u8]) {
         self.metrics.content_delivery.record_send();
+        self.metrics.content_delivery.set_source_node(self.source_id);
         self.metrics.propagation.record_publish();
 
         // Envoyer aux enfants dans chaque arbre

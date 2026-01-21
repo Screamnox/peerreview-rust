@@ -704,6 +704,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "hex",
+ "rand",
  "serde",
  "serde_json",
  "serde_yaml",

@@ -1,0 +1,18 @@
+Metrique,Sous-metrique,Valeur,Unite
+1. Content Delivery,chunks_sent,1,count
+1. Content Delivery,avg_delivery_rate,90.0,%
+2. Network Traffic,total_messages,27,count
+2. Network Traffic,total_bytes,0,bytes
+2. Network Traffic,pr_overhead,0.0,%
+3. Detection Time,time_to_detection,225,ms
+3. Detection Time,method,Consistency,
+4. Propagation Latency,min,18,ms
+4. Propagation Latency,avg,21,ms
+4. Propagation Latency,p95,24,ms
+4. Propagation Latency,max,24,ms
+5. Accuracy,true_positives,0,count
+5. Accuracy,false_positives,0,count
+5. Accuracy,true_negatives,0,count
+5. Accuracy,false_negatives,0,count
+5. Accuracy,detection_rate,100.0,%
+5. Accuracy,precision,100.0,%

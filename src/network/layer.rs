@@ -6,6 +6,7 @@ use std::sync::mpsc::{self, Sender, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
+use crate::PeerReviewType;
 use crate::types::messages::PeerReviewMsg;
 use crate::types::node::NodeId;
 
@@ -50,7 +51,7 @@ pub struct NetworkLayer {
 
 impl NetworkLayer {
     /// Create a new network layer and start reactor thread
-    pub fn new(initial_peers: HashMap<NodeId, std::net::TcpStream>) -> io::Result<Self> {
+    pub fn new(initial_peers: HashMap<NodeId, std::net::TcpStream>, task_tx:Sender<(PeerReviewType,NodeId,String)>) -> io::Result<Self> {
         let poll = Poll::new()?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKE_TOKEN)?);
 

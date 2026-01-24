@@ -2,7 +2,7 @@ use bincode::{Decode, Encode};
 use ed25519_dalek::{Keypair, PublicKey};
 use std::collections::HashMap;
 
-use crate::{journal::Logger, types::PeerReviewMsg};
+use crate::{journal::Logger, network::NetworkLayer, types::PeerReviewMsg};
 
 pub type NodeId = u32;
 
@@ -36,6 +36,7 @@ pub struct Node {
     pub logger: Logger,
     pub peers: HashMap<NodeId, PeerInfo>,
     pub witnesses: Vec<NodeId>,
+    pub network_layer: NetworkLayer
 }
 
 impl Node {
@@ -46,13 +47,14 @@ impl Node {
     /// * `keypair` - Paire de clés Ed25519 pour les signatures
     /// * `logger` - Journal initialisé
     /// * `witnesses` - Liste des IDs des témoins (doit être un sous-ensemble des peers)
-    pub fn new(id: NodeId, keypair: Keypair, logger: Logger, witnesses: Vec<NodeId>) -> Self {
+    pub fn new(id: NodeId, keypair: Keypair, logger: Logger, witnesses: Vec<NodeId>, network_layer: NetworkLayer) -> Self {
         Self {
             id,
             keypair,
             logger, // TODO: Ouverture via le path
             peers: HashMap::new(),
             witnesses,
+            network_layer,
         }
     }
 

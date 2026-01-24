@@ -29,3 +29,8 @@ __pycache__/
 # Jupyter / misc
 .ipynb_checkpoints/
 Thumbs.db
+
+# Python venv / caches
+.venv/
+**/__pycache__/
+**/*.pyc

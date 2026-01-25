@@ -3,9 +3,9 @@ use std::io;
 use crate::{
     journal::entry::LogEntry,
     types::{
-        node::{Node, NodeId},
-        messages::{AuditRequest, AuditResponse},
         PeerReviewMsg,
+        messages::{AuditRequest, AuditResponse},
+        node::{Node, NodeId},
     },
 };
 
@@ -28,18 +28,15 @@ impl Snapshot {
 /// Audit protocol
 impl Node {
     /// Witness - Send Audit Request
-    pub fn send_audit_request(
-        &mut self,
-        target: NodeId,
-    ) -> io::Result<()> {
+    pub fn send_audit_request(&mut self, target: NodeId) -> io::Result<()> {
         let auths = match self.stored_authenticators.get(&target) {
             Some(a) => a,
-            None => return Ok(()),  // TODO
+            None => return Ok(()), // TODO
         };
 
         let recent_seq = match auths.last() {
             Some(a) => a.seq,
-            None => return Ok(()),  // TODO
+            None => return Ok(()), // TODO
         };
 
         let last_audit_seq = match self.get_peer_last_audit_seq(target) {
@@ -57,11 +54,7 @@ impl Node {
     }
 
     /// Target - Recv audit request
-    pub fn recv_audit_request(
-        &mut self,
-        sender: NodeId,
-        pr_msg: &PeerReviewMsg,
-    ) -> io::Result<()> {
+    pub fn recv_audit_request(&mut self, sender: NodeId, pr_msg: &PeerReviewMsg) -> io::Result<()> {
         let req = match pr_msg {
             PeerReviewMsg::AuditRequest(r) => r,
             _ => return Ok(()),
@@ -92,12 +85,7 @@ impl Node {
     }
 
     /// Replay and verify
-    fn replay_and_verify(
-        &mut self,
-        target: NodeId,
-        logs: &[LogEntry],
-    ) -> io::Result<()> {
-
+    fn replay_and_verify(&mut self, target: NodeId, logs: &[LogEntry]) -> io::Result<()> {
         let snapshot = self
             .snapshots
             .get(&target)
@@ -134,7 +122,6 @@ impl Node {
         _snapshot: Snapshot,
         logs: &[LogEntry],
     ) -> io::Result<Vec<LogEntry>> {
-
         // Dépend entièrement de l’application
         Ok(logs.to_vec())
     }
@@ -142,9 +129,6 @@ impl Node {
     fn create_snapshot(&mut self, target: NodeId) {
         let snap = Snapshot::new();
 
-        self.snapshots
-            .entry(target)
-            .or_default()
-            .push(snap);
+        self.snapshots.entry(target).or_default().push(snap);
     }
 }

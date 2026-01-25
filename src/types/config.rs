@@ -164,9 +164,7 @@ impl Config {
             witnesses: WitnessesConfig {
                 list: Vec::new(), // À remplir manuellement
             },
-            watched: WatchedConfig { 
-                list: Vec::new(),
-            }
+            watched: WatchedConfig { list: Vec::new() },
         }
     }
 }

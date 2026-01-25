@@ -5,42 +5,6 @@ use crate::journal::entry::LogEntry;
 
 use super::node::NodeId;
 
-/// ====================
-///   Log / Commitment
-/// ====================
-
-/*
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
-pub enum MsgType {
-    Send = 0,
-    Recv = 1,
-}
-
-#[derive(Debug, Clone, Encode, Decode)]
-pub enum MsgContent {
-    SendContent {
-        dest: NodeId,
-        message: String,
-    },
-    RecvContent {
-        src: NodeId,
-        src_seq: usize,
-        message: String,
-    },
-}
-
-/// Entrée du journal
-#[derive(Debug, Clone, Encode, Decode)]
-pub struct MsgLogEntry {
-    pub seq: usize,
-    pub msg_type: MsgType,
-    pub dest: NodeId,
-    pub hash: [u8; 32],
-    pub sig: [u8; 64],
-    pub content: MsgContent,
-}
-*/
-
 /// =================
 ///   Authenticator
 /// =================
@@ -143,20 +107,20 @@ pub enum ChallengeAnswer {
 
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub enum EvidenceType {
-    SignatureMismatch,      // Signature différente de l'authenticator stocké
-    BrokenHashChain,        // Chaîne de hash invalide
-    InvalidSignature,       // Signature Ed25519 invalide
-    InvalidAckResponse,     // Faute au challenge d'envoi
-    MissingLogEntries,      // Faute au challenge d'audit
+    SignatureMismatch,  // Signature différente de l'authenticator stocké
+    BrokenHashChain,    // Chaîne de hash invalide
+    InvalidSignature,   // Signature Ed25519 invalide
+    InvalidAckResponse, // Faute au challenge d'envoi
+    MissingLogEntries,  // Faute au challenge d'audit
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Proof {
     pub faulty_node: NodeId,
     pub accuser_node: NodeId,
-    pub authenticator: Authenticator,       // Authenticator prouvant l'état fautif
-    pub log_suffix: Option<Vec<LogEntry>>,  // Suffixe divergent du journal
-    pub challenge_key: Option<ChallengeKey>,// Challenge qui a échoué
+    pub authenticator: Authenticator, // Authenticator prouvant l'état fautif
+    pub log_suffix: Option<Vec<LogEntry>>, // Suffixe divergent du journal
+    pub challenge_key: Option<ChallengeKey>, // Challenge qui a échoué
     pub kind: Option<EvidenceType>,
     pub reason: Option<String>,
 }

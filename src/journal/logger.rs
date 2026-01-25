@@ -18,7 +18,7 @@ pub const HASH_INIT: [u8; 32] = [
 /// Journaliseur : écrit les entrées dans un fichier texte
 pub struct Logger {
     pub s_k: usize,
-    pub line_max: usize,        // TODO: Getter OR pub?
+    pub line_max: usize, // TODO: Getter OR pub?
     line_current: usize,
     file: File,
     hash: [u8; 32],
@@ -248,34 +248,34 @@ impl Logger {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "La taille demandée résultante de s_k_start et s_k_end est supérieur à la taille de stockage du log",
-            ))
+            ));
         }
 
         let mut result = Vec::with_capacity(size);
         let mut count = 0;
         let max_iterations = lines.len(); // Limite pour éviter boucle infinie
-        
+
         // Commencer par le log le plus récent
         let mut id: usize = self.line_current.saturating_sub(1);
 
         while count < max_iterations {
             let entry = LogEntry::deserialize(&lines[id])?;
-            
+
             // Si le log est dans la plage demandée, l'ajouter
             if entry.s_k >= s_k_start && entry.s_k <= s_k_end {
                 result.push(entry.clone());
-                
+
                 // Si on a tous les logs demandés, arrêter
                 if result.len() >= size {
                     break;
                 }
             }
-            
+
             // Arrêter si on est allé trop loin dans le passé
             if entry.s_k < s_k_start {
                 break;
             }
-            
+
             // Passer au log précédent
             if id == 0 {
                 id = lines.len() - 1;
@@ -284,10 +284,10 @@ impl Logger {
             }
             count += 1;
         }
-        
+
         // Trier par s_k croissant
         result.sort_by_key(|entry| entry.s_k);
-        
+
         Ok(result)
     }
 

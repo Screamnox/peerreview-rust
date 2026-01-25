@@ -1,0 +1,44 @@
+services:
+  node1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.node
+    command: ["nodes/node1/node1.toml"]
+    ports:
+      - "5001:5001"
+    networks:
+      - peerreview_net
+
+  node2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.node
+    command: ["nodes/node2/node2.toml"]
+    ports:
+      - "5002:5002"
+    networks:
+      - peerreview_net
+
+  node3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.node
+    command: ["nodes/node3/node3.toml"]
+    ports:
+      - "5003:5003"
+    networks:
+      - peerreview_net
+
+  node4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.node
+    command: ["nodes/node4/node4.toml"]
+    ports:
+      - "5004:5004"
+    networks:
+      - peerreview_net
+
+networks:
+  peerreview_net:
+    driver: bridge

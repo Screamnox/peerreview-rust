@@ -1,8 +1,8 @@
+use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Token, Waker};
-use mio::net::{TcpStream};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::sync::mpsc::{self, Sender, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -36,7 +36,7 @@ struct NetworkState {
     /// Waker to notify reactor of new commands
     waker: Arc<Waker>,
 
-    /// Current peer list (updated by reactor) 
+    /// Current peer list (updated by reactor)
     peers: Arc<Mutex<Vec<NodeId>>>,
 }
 
@@ -44,12 +44,15 @@ struct NetworkState {
 pub struct NetworkLayer {
     state: Arc<NetworkState>,
     message_rx: Receiver<(NodeId, PeerReviewMsg)>,
-    reactor_handle: Option<JoinHandle<io::Result<()>>>
+    reactor_handle: Option<JoinHandle<io::Result<()>>>,
 }
 
 impl NetworkLayer {
     /// Create a new network layer and start reactor thread
-    pub fn new(initial_peers: HashMap<NodeId, std::net::TcpStream>, task_tx:Sender<RuntimeTask>) -> io::Result<Self> {
+    pub fn new(
+        initial_peers: HashMap<NodeId, std::net::TcpStream>,
+        task_tx: Sender<RuntimeTask>,
+    ) -> io::Result<Self> {
         let poll = Poll::new()?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKE_TOKEN)?);
 
@@ -91,7 +94,8 @@ impl NetworkLayer {
         });
 
         // Wait for reactor to be ready
-        ready_rx.recv()
+        ready_rx
+            .recv()
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Reactor failed to start"))?;
 
         let state = Arc::new(NetworkState {
@@ -110,27 +114,29 @@ impl NetworkLayer {
     /// Send a message to a peer
     pub fn send(&self, peer_id: NodeId, msg: &PeerReviewMsg) -> io::Result<()> {
         let encoded = super::messages::encode(msg)?;
-        
-        self.state.command_tx
+
+        self.state
+            .command_tx
             .send(ReactorCommand::Send { peer_id, encoded })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Reactor closed"))?;
-        
+
         // Wake the reactor to process immediately
         let _ = self.state.waker.wake();
-        
+
         Ok(())
     }
-    
+
     /// Receive a message (blocking)
-    /// 
+    ///
     /// Returns (peer_id, message) or error if reactor is closed
     pub fn recv(&self) -> io::Result<(NodeId, PeerReviewMsg)> {
-        self.message_rx.recv()
+        self.message_rx
+            .recv()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Reactor closed"))
     }
-    
+
     /// Try to receive a message (non-blocking)
-    /// 
+    ///
     /// Returns Some((peer_id, message)) if a message is available, None otherwise
     pub fn try_recv(&self) -> io::Result<Option<(NodeId, PeerReviewMsg)>> {
         match self.message_rx.try_recv() {
@@ -141,29 +147,30 @@ impl NetworkLayer {
             }
         }
     }
-    
+
     /// Get the number of connected peers
     pub fn peer_count(&self) -> usize {
         self.state.peers.lock().unwrap().len()
     }
-    
+
     /// Check if a specific peer is connected
     pub fn has_peer(&self, peer_id: NodeId) -> bool {
         self.state.peers.lock().unwrap().contains(&peer_id)
     }
-    
+
     /// Get list of all connected peer IDs
     pub fn get_peer_ids(&self) -> Vec<NodeId> {
         self.state.peers.lock().unwrap().clone()
     }
-    
+
     /// Shutdown the network layer gracefully
     pub fn shutdown(mut self) -> io::Result<()> {
         let _ = self.state.command_tx.send(ReactorCommand::Shutdown);
         let _ = self.state.waker.wake();
-        
+
         if let Some(handle) = self.reactor_handle.take() {
-            handle.join()
+            handle
+                .join()
                 .map_err(|_| io::Error::new(io::ErrorKind::Other, "Reactor panicked"))?
         } else {
             Ok(())
@@ -235,7 +242,7 @@ impl Reactor {
                                 let _ = self.drop_peer(token);
                             }
                         }
-                        
+
                         if event.is_writable() {
                             if let Err(e) = self.handle_writable(token) {
                                 eprintln!("[Reactor] Write error on {:?}: {}", token, e);
@@ -257,7 +264,7 @@ impl Reactor {
         self.poll.registry().register(
             &mut stream,
             token,
-            Interest::READABLE | Interest::WRITABLE
+            Interest::READABLE | Interest::WRITABLE,
         )?;
 
         let conn = Connection {
@@ -275,18 +282,22 @@ impl Reactor {
             peers.push(peer_id);
         }
 
-        println!("[Reactor] Peer {} registered with token {:?}", peer_id, token);
-        
+        println!(
+            "[Reactor] Peer {} registered with token {:?}",
+            peer_id, token
+        );
+
         Ok(())
     }
 
     fn queue_send(&mut self, peer_id: NodeId, encoded: Vec<u8>) -> io::Result<()> {
         let token = {
-            let conn = self.connections.get_mut(&peer_id)
-                .ok_or_else(|| io::Error::new(
+            let conn = self.connections.get_mut(&peer_id).ok_or_else(|| {
+                io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("Peer {} not connected", peer_id)
-                ))?;
+                    format!("Peer {} not connected", peer_id),
+                )
+            })?;
 
             conn.write_buffer.extend_from_slice(&encoded);
             conn.token
@@ -298,7 +309,9 @@ impl Reactor {
     }
 
     fn handle_readable(&mut self, token: Token) -> io::Result<()> {
-        let peer_id = *self.token_to_peer.get(&token)
+        let peer_id = *self
+            .token_to_peer
+            .get(&token)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Token not found"))?;
 
         let conn = self.connections.get_mut(&peer_id).unwrap();
@@ -320,7 +333,7 @@ impl Reactor {
                             // User dropped the receiver, might as well stop
                             return Err(io::Error::new(
                                 io::ErrorKind::BrokenPipe,
-                                "Message receiver dropped"
+                                "Message receiver dropped",
                             ));
                         }
 
@@ -344,13 +357,13 @@ impl Reactor {
             Some(&id) => id,
             None => return Ok(()),
         };
-        
+
         let conn = self.connections.get_mut(&peer_id).unwrap();
-        
+
         if conn.write_buffer.is_empty() {
             return Ok(());
         }
-        
+
         loop {
             match conn.stream.write(&conn.write_buffer) {
                 Ok(0) => {
@@ -358,7 +371,7 @@ impl Reactor {
                 }
                 Ok(n) => {
                     conn.write_buffer.drain(..n);
-                    
+
                     if conn.write_buffer.is_empty() {
                         break;
                     }
@@ -368,7 +381,7 @@ impl Reactor {
                 Err(e) => return Err(e),
             }
         }
-        
+
         Ok(())
     }
 
@@ -380,10 +393,10 @@ impl Reactor {
 
             let mut peers = self.peers.lock().unwrap();
             peers.retain(|&id| id != peer_id);
-            
+
             println!("[Reactor] Peer {} removed (token {:?})", peer_id, token);
         }
-        
+
         Ok(())
     }
 }

@@ -4,18 +4,15 @@ use sha2::{Digest, Sha256};
 use crate::journal::entry::{LogEntry, LogType};
 use crate::types::messages::Authenticator;
 use crate::types::{
+    PeerReviewMsg,
     messages::{AuditRequest, AuditResponse},
     node::{Node, NodeId},
-    PeerReviewMsg,
 };
 
 impl Node {
     /// Witness - Send Challenge
     /// Note: Called when authenticator threshold is reached
-    pub fn send_consistency_challenge(
-        &mut self,
-        target: NodeId,
-    ) -> std::io::Result<()> {
+    pub fn send_consistency_challenge(&mut self, target: NodeId) -> std::io::Result<()> {
         let auths = match self.stored_authenticators.get(&target) {
             Some(a) => a,
             None => {
@@ -23,16 +20,13 @@ impl Node {
                     std::io::ErrorKind::InvalidData,
                     "Empty authenticator store",
                 ));
-            },
+            }
         };
 
         let min_seq = auths.iter().map(|a| a.seq).min().unwrap();
         let max_seq = auths.iter().map(|a| a.seq).max().unwrap();
 
-        let msg = PeerReviewMsg::ConsistencyRequest(AuditRequest { 
-            min_seq,
-            max_seq, 
-        });
+        let msg = PeerReviewMsg::ConsistencyRequest(AuditRequest { min_seq, max_seq });
 
         self.send(target, msg)
     }
@@ -45,7 +39,7 @@ impl Node {
     ) -> std::io::Result<()> {
         let req = match pr_msg {
             PeerReviewMsg::ConsistencyRequest(r) => r,
-            _ => return Ok(()),     // TODO improve error
+            _ => return Ok(()), // TODO improve error
         };
 
         // TODO
@@ -54,9 +48,9 @@ impl Node {
         let logs = self.logger.get_log(req.min_seq, req.max_seq)?;
         // TODO Maybe filter before not after
 
-        let response = PeerReviewMsg::ConsistencyResponse(AuditResponse { 
+        let response = PeerReviewMsg::ConsistencyResponse(AuditResponse {
             entries: logs,
-            prev_hash: self.logger.get_current_hash(),  // it is last_hash not prev_hash
+            prev_hash: self.logger.get_current_hash(), // it is last_hash not prev_hash
         });
 
         // TODO: Is it necessary to log it? In the previous code it was
@@ -66,11 +60,7 @@ impl Node {
     }
 
     /// Witness - Verify response
-    pub fn verify_consistency_response(
-        &mut self,
-        target: NodeId,
-        pr_msg: &PeerReviewMsg,
-    ) -> bool {
+    pub fn verify_consistency_response(&mut self, target: NodeId, pr_msg: &PeerReviewMsg) -> bool {
         let response = match pr_msg {
             PeerReviewMsg::ConsistencyResponse(r) => r,
             _ => return false,
@@ -92,8 +82,12 @@ impl Node {
                 None => {
                     self.mark_as_exposed(
                         target,
-                        Authenticator { seq: 0, hash: [0u8; 32], sig: [0u8; 64]}
-                    );   // TODO check is it possible
+                        Authenticator {
+                            seq: 0,
+                            hash: [0u8; 32],
+                            sig: [0u8; 64],
+                        },
+                    ); // TODO check is it possible
                     return false;
                 }
             };
@@ -115,7 +109,7 @@ impl Node {
         }
 
         self.clear_authenticators(target);
-        
+
         true
     }
 }
@@ -125,10 +119,7 @@ impl Node {
  * ==================
  */
 
-fn verify_log_hash(
-    entry: &LogEntry,
-    logs: &[LogEntry],
-) -> bool {
+fn verify_log_hash(entry: &LogEntry, logs: &[LogEntry]) -> bool {
     let prev_hash = if entry.s_k == 1 {
         // TODO: implement LogEntry::hash_init()
         [
@@ -163,11 +154,7 @@ fn verify_log_hash(
     computed == entry.hash
 }
 
-fn verify_entry_signature(
-    entry: &LogEntry,
-    public_key: &ed25519_dalek::PublicKey,
-) -> bool {
-
+fn verify_entry_signature(entry: &LogEntry, public_key: &ed25519_dalek::PublicKey) -> bool {
     let mut signed = [0u8; 40];
     signed[..8].copy_from_slice(&entry.s_k.to_be_bytes());
     signed[8..].copy_from_slice(&entry.hash);

@@ -5,7 +5,7 @@ use std::time::Duration;
 use peerreview_rust::types::Config;
 use peerreview_rust::{PeerReviewRuntime, RuntimeTask};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {    
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {
         eprintln!("Usage: {} <node_config.toml>", args[0]);
@@ -31,14 +31,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Application logic
     thread::spawn(move || {
         // Send a message
-        task_sender.send(RuntimeTask::SendMessage {
-            dest: if config.node.id == 1 {2} else {1},
-            msg: "Hello, peer!".to_string(),
-        }).unwrap();
-        
+        task_sender
+            .send(RuntimeTask::SendMessage {
+                dest: if config.node.id == 1 { 2 } else { 1 },
+                msg: "Hello, peer!".to_string(),
+            })
+            .unwrap();
+
         // Wait a bit
         thread::sleep(Duration::from_secs(5));
-        
+
         // Shutdown
         shutdown_sender.send(true).unwrap();
     });

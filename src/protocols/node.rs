@@ -1,5 +1,5 @@
 use ed25519_dalek::Keypair;
-use std::{collections::HashMap};
+use std::collections::HashMap;
 
 use crate::{journal::Logger, protocols::audit::Snapshot};
 
@@ -24,17 +24,17 @@ pub struct PeerReviewMessage {
 /// Authenticator stocké par un témoin
 #[derive(Debug, Clone)]
 pub struct StoredAuthenticator {
-    pub node_id: u32,       // Nœud surveillé
-    pub seq_num: usize,     // Numéro de séquence
+    pub node_id: u32,        // Nœud surveillé
+    pub seq_num: usize,      // Numéro de séquence
     pub signature: [u8; 64], // Signature Ed25519
 }
 
 /// État de détection d'un nœud (Algorithm 15)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DetectionState {
-    Trusted,        // État par défaut: nœud correct/de confiance
-    Suspected,      // Nœud suspect (challenge en attente)
-    Exposed,        // Nœud définitivement fautif
+    Trusted,   // État par défaut: nœud correct/de confiance
+    Suspected, // Nœud suspect (challenge en attente)
+    Exposed,   // Nœud définitivement fautif
 }
 
 /// Challenge en attente pour un nœud suspect
@@ -64,7 +64,7 @@ pub struct PeerReviewNode {
     /// Challenges en attente pour les nœuds suspects
     pub pending_challenges: HashMap<u32, Vec<PendingChallenge>>,
     /// Liste des snapchot des témoins
-    pub snapchot_list_witness: HashMap<u32, Vec<Snapshot>>
+    pub snapchot_list_witness: HashMap<u32, Vec<Snapshot>>,
 }
 
 impl PeerReviewNode {
@@ -157,7 +157,11 @@ impl PeerReviewNode {
             .or_insert_with(Vec::new)
             .push(auth);
 
-        let count = self.stored_authenticators.get(&observed_node_id).unwrap().len();
+        let count = self
+            .stored_authenticators
+            .get(&observed_node_id)
+            .unwrap()
+            .len();
         println!(
             "[Témoin {}] Authenticator stocké pour nœud {} (seq={}). Total: {}",
             self.node_id, observed_node_id, seq_num, count
@@ -173,4 +177,3 @@ impl PeerReviewNode {
         }
     }
 }
-

@@ -34,7 +34,7 @@ impl Bootstrap {
         timeout_secs: u64,
     ) -> Result<HashMap<NodeId, TcpStream>, String> {
         let timeout = Duration::from_secs(timeout_secs);
-        
+
         // Expected peers (excluding ourselves)
         let expected_peers: Vec<NodeId> = peers_config
             .peers
@@ -44,9 +44,12 @@ impl Bootstrap {
             .collect();
 
         let expected_count = expected_peers.len();
-        println!("[Bootstrap] Node {} expecting {} peers: {:?}", node_id, expected_count, expected_peers);
+        println!(
+            "[Bootstrap] Node {} expecting {} peers: {:?}",
+            node_id, expected_count, expected_peers
+        );
 
-        let connections: Arc<Mutex<HashMap<NodeId, TcpStream>>> = 
+        let connections: Arc<Mutex<HashMap<NodeId, TcpStream>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         let connected_count = Arc::new(AtomicUsize::new(0));
@@ -58,13 +61,15 @@ impl Bootstrap {
             let connected_count = Arc::clone(&connected_count);
             let done = Arc::clone(&done);
 
-            let listen_addr: SocketAddr = listen_addr.parse()
+            let listen_addr: SocketAddr = listen_addr
+                .parse()
                 .map_err(|e| format!("Invalid listen address: {}", e))?;
-            
+
             let listener = std::net::TcpListener::bind(listen_addr)
                 .map_err(|e| format!("Failed to bind listener: {}", e))?;
 
-            listener.set_nonblocking(true)
+            listener
+                .set_nonblocking(true)
                 .map_err(|e| format!("Failed to set non-blocking: {}", e))?;
 
             std::thread::spawn(move || {
@@ -78,8 +83,10 @@ impl Bootstrap {
                             if !conns.contains_key(&peer_id) {
                                 conns.insert(peer_id, stream);
                                 let count = connected_count.fetch_add(1, Ordering::SeqCst) + 1;
-                                println!("[Bootstrap] Peer {} connected (incoming) [{}/{}]", 
-                                    peer_id, count, expected_count);
+                                println!(
+                                    "[Bootstrap] Peer {} connected (incoming) [{}/{}]",
+                                    peer_id, count, expected_count
+                                );
                             } else {
                                 println!("[Bootstrap] Peer {} already connected, ignored", peer_id);
                             }
@@ -104,10 +111,10 @@ impl Bootstrap {
             let connected_count = Arc::clone(&connected_count);
             let done = Arc::clone(&done);
             let peers_config = peers_config.clone();
-            
+
             std::thread::spawn(move || {
                 println!("[Bootstrap] Outgoing connection thread started");
-                
+
                 let start = Instant::now();
                 let mut last_attempt: HashMap<NodeId, Instant> = HashMap::new();
                 const RETRY_AFTER: Duration = Duration::from_secs(2);
@@ -144,8 +151,10 @@ impl Bootstrap {
                                 if !conns.contains_key(&peer_id) {
                                     conns.insert(peer_id, stream);
                                     let count = connected_count.fetch_add(1, Ordering::SeqCst) + 1;
-                                    println!("[Bootstrap] Peer {} connected (outgoing) [{}/{}]", 
-                                        peer_id, count, expected_count);
+                                    println!(
+                                        "[Bootstrap] Peer {} connected (outgoing) [{}/{}]",
+                                        peer_id, count, expected_count
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -159,7 +168,7 @@ impl Bootstrap {
 
                     std::thread::sleep(Duration::from_millis(200));
                 }
-                
+
                 println!("[Bootstrap] Outgoing connection thread finished");
             })
         };
@@ -167,12 +176,15 @@ impl Bootstrap {
         // Wait for all connections to be established
         let start = Instant::now();
         let mut last_log = Instant::now();
-        
+
         loop {
             let current_count = connected_count.load(Ordering::SeqCst);
-            
+
             if current_count >= expected_count {
-                println!("[Bootstrap] All peers connected ({}/{})", current_count, expected_count);
+                println!(
+                    "[Bootstrap] All peers connected ({}/{})",
+                    current_count, expected_count
+                );
                 done.store(true, Ordering::SeqCst);
                 break;
             }
@@ -181,7 +193,7 @@ impl Bootstrap {
                 done.store(true, Ordering::SeqCst);
                 let _ = accept_handle.join();
                 let _ = connect_handle.join();
-                
+
                 return Err(format!(
                     "Bootstrap timeout: only {}/{} peers connected after {:?}",
                     current_count, expected_count, timeout
@@ -190,7 +202,10 @@ impl Bootstrap {
 
             // Log progress every 3 seconds
             if last_log.elapsed() >= Duration::from_secs(3) {
-                println!("[Bootstrap] Progress: {}/{} peers connected...", current_count, expected_count);
+                println!(
+                    "[Bootstrap] Progress: {}/{} peers connected...",
+                    current_count, expected_count
+                );
                 last_log = Instant::now();
             }
 
@@ -207,24 +222,27 @@ impl Bootstrap {
             .into_inner()
             .map_err(|_| "Failed to unwrap connections Mutex")?;
 
-        println!("[Bootstrap] Complete: {} peers connected", connections.len());
+        println!(
+            "[Bootstrap] Complete: {} peers connected",
+            connections.len()
+        );
         Ok(connections)
     }
 
     /// Get peer information from config
-    /// 
+    ///
     /// Returns Vec<(NodeId, PublicKey, Vec<NodeId>)> for all peers except the given node_id
     pub fn get_peer_info(
         node_id: NodeId,
         peers_config: &PeersConfig,
     ) -> Result<Vec<(NodeId, PublicKey, Vec<NodeId>)>, String> {
         let mut infos = Vec::new();
-        
+
         for peer in peers_config.peers.iter().filter(|p| p.id != node_id) {
             let pk = Self::decode_public_key(&peer.public_key)?;
             infos.push((peer.id, pk, peer.witnesses.clone()));
         }
-        
+
         Ok(infos)
     }
 
@@ -240,10 +258,16 @@ impl Bootstrap {
         timeout: Duration,
     ) -> std::io::Result<(NodeId, TcpStream)> {
         let mut addrs_iter = address.to_socket_addrs().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Adresse invalide: {}", address))
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Adresse invalide: {}", address),
+            )
         })?;
         let socket_addr = addrs_iter.next().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Adresse non résolue: {}", address))
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Adresse non résolue: {}", address),
+            )
         })?;
 
         let mut stream = TcpStream::connect_timeout(&socket_addr, timeout)?;
@@ -288,7 +312,7 @@ impl Bootstrap {
 
     /// Decode public key from base64
     fn decode_public_key(base64_str: &str) -> Result<PublicKey, String> {
-        use base64::{engine::general_purpose, Engine as _};
+        use base64::{Engine as _, engine::general_purpose};
 
         let bytes = general_purpose::STANDARD
             .decode(base64_str)

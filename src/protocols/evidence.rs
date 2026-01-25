@@ -1,11 +1,16 @@
-
 use ed25519_dalek::Verifier;
 
-use crate::{journal::{entry::LogType, logger}, protocols, types::{
-    Challenge, PeerReviewMsg, PeerStatus, Proof, messages::{
-        Authenticator, ChallengeRequest, EvidenceRequest, EvidenceResponse, EvidenceType
-    }, node::{Node, NodeId}
-}};
+use crate::{
+    journal::{entry::LogType, logger},
+    protocols,
+    types::{
+        Challenge, PeerReviewMsg, PeerStatus, Proof,
+        messages::{
+            Authenticator, ChallengeRequest, EvidenceRequest, EvidenceResponse, EvidenceType,
+        },
+        node::{Node, NodeId},
+    },
+};
 
 impl Node {
     /// Receive challenge signal from consistency/audit protocols (algo 15)
@@ -17,21 +22,18 @@ impl Node {
 
     /// If a node receives a message from a suspected node,
     /// challenge them with all pending challenges
-    pub fn handle_message_from_suspected_node(
-        &mut self,
-        sender: NodeId
-    ) -> std::io::Result<()> {
+    pub fn handle_message_from_suspected_node(&mut self, sender: NodeId) -> std::io::Result<()> {
         if !self.is_suspected(sender) {
-            return Ok(());  // TODO Fix
+            return Ok(()); // TODO Fix
         }
 
-        let challenges = self.get_challenges(sender)
-            .unwrap_or_default();   // TODO
+        let challenges = self.get_challenges(sender).unwrap_or_default(); // TODO
 
         for challenge in challenges {
-            self.send(sender, PeerReviewMsg::ChallengeRequest(
-                ChallengeRequest { challenge },
-            ))?
+            self.send(
+                sender,
+                PeerReviewMsg::ChallengeRequest(ChallengeRequest { challenge }),
+            )?
         }
 
         Ok(())
@@ -43,7 +45,7 @@ impl Node {
         // For each node we communicate with (directly or indirectly)
         for (peer_id, _) in self.peers.clone() {
             if peer_id == self.id {
-                continue;  // Skip ourselves, SHOULD NOT happen
+                continue; // Skip ourselves, SHOULD NOT happen
             }
             self.request_evidence_from_witnesses(peer_id)?;
         }
@@ -51,19 +53,14 @@ impl Node {
     }
 
     /// Request evidence from witnesses about a target node
-    pub fn request_evidence_from_witnesses(
-        &mut self,
-        target: NodeId,
-    ) -> std::io::Result<()> {
+    pub fn request_evidence_from_witnesses(&mut self, target: NodeId) -> std::io::Result<()> {
         let witnesses = self.get_witnesses(target);
-        
+
         if witnesses.is_empty() {
             return Ok(());
         }
 
-        let msg = PeerReviewMsg::EvidenceRequest(
-            EvidenceRequest { target }
-        );
+        let msg = PeerReviewMsg::EvidenceRequest(EvidenceRequest { target });
 
         for witness_id in witnesses {
             self.send(witness_id, msg.clone())?;
@@ -79,11 +76,9 @@ impl Node {
     ) -> std::io::Result<()> {
         let target = request.target;
 
-        let challenges = self.get_challenges(target)
-            .unwrap_or_default();   // TODO
+        let challenges = self.get_challenges(target).unwrap_or_default(); // TODO
 
-        let proofs = self.get_proofs(target)
-            .unwrap_or_default();  // TODO
+        let proofs = self.get_proofs(target).unwrap_or_default(); // TODO
 
         let response = EvidenceResponse {
             target,
@@ -124,7 +119,7 @@ impl Node {
 
         self.set_peer_status(proof.faulty_node, PeerStatus::Exposed);
         self.add_proof(&proof.faulty_node, proof.clone());
-        
+
         // If there's a challenge key, we can remove related challenges
         if let Some(key) = proof.challenge_key {
             self.remove_challenge(proof.faulty_node, key);
@@ -176,9 +171,9 @@ impl Node {
     }
 
     fn verify_broken_hash_chain_proof(
-        &self, 
-        proof: &Proof, 
-        _faulty_pk: &ed25519_dalek::PublicKey
+        &self,
+        proof: &Proof,
+        _faulty_pk: &ed25519_dalek::PublicKey,
     ) -> bool {
         let log_suffix = match &proof.log_suffix {
             Some(logs) => logs,
@@ -199,19 +194,15 @@ impl Node {
 
             // Calculate commitment hash for current entry
             let commitment_hash = match curr_entry.log_type {
-                LogType::Send => {
-                    protocols::commitment::calculate_send_content_hash(
-                        curr_entry.corr,
-                        &curr_entry.msg,
-                    )
-                }
-                LogType::Recv => {
-                    protocols::commitment::calculate_recv_content_hash(
-                        curr_entry.corr,
-                        curr_entry.s_k_corr,
-                        &curr_entry.msg,
-                    )
-                }
+                LogType::Send => protocols::commitment::calculate_send_content_hash(
+                    curr_entry.corr,
+                    &curr_entry.msg,
+                ),
+                LogType::Recv => protocols::commitment::calculate_recv_content_hash(
+                    curr_entry.corr,
+                    curr_entry.s_k_corr,
+                    &curr_entry.msg,
+                ),
             };
 
             // Calculate expected hash
@@ -235,12 +226,12 @@ impl Node {
     fn verify_invalid_signature_proof(
         &self,
         proof: &Proof,
-        faulty_pk: &ed25519_dalek::PublicKey
+        faulty_pk: &ed25519_dalek::PublicKey,
     ) -> bool {
         // The authenticator in the proof should have an INVALID signature
         // We already verified it's signed correctly above (for the authenticator itself)
         // Now we need to check if the log entries have invalid signatures
-        
+
         let log_suffix = match &proof.log_suffix {
             Some(logs) => logs,
             None => {
@@ -253,18 +244,13 @@ impl Node {
         for entry in log_suffix {
             let commitment_hash = match entry.log_type {
                 LogType::Send => {
-                    protocols::commitment::calculate_send_content_hash(
-                        entry.corr,
-                        &entry.msg,
-                    )
+                    protocols::commitment::calculate_send_content_hash(entry.corr, &entry.msg)
                 }
-                LogType::Recv => {
-                    protocols::commitment::calculate_recv_content_hash(
-                        entry.corr,
-                        entry.s_k_corr,
-                        &entry.msg,
-                    )
-                }
+                LogType::Recv => protocols::commitment::calculate_recv_content_hash(
+                    entry.corr,
+                    entry.s_k_corr,
+                    &entry.msg,
+                ),
             };
 
             let hash = protocols::commitment::calculate_hash(
@@ -283,12 +269,12 @@ impl Node {
             let sig = match ed25519_dalek::Signature::from_bytes(&entry.sig) {
                 Ok(s) => s,
                 Err(_) => {
-                    return true;  // Invalid signature format proves the claim
+                    return true; // Invalid signature format proves the claim
                 }
             };
 
             if faulty_pk.verify(&signed_data, &sig).is_err() {
-                return true;  // Invalid signature proves the claim
+                return true; // Invalid signature proves the claim
             }
         }
 
@@ -299,15 +285,15 @@ impl Node {
     fn verify_signature_mismatch_proof(
         &self,
         proof: &Proof,
-        faulty_pk: &ed25519_dalek::PublicKey
+        faulty_pk: &ed25519_dalek::PublicKey,
     ) -> bool {
         // Similar to invalid signature, but specifically for mismatched signatures
         // The authenticator signature doesn't match the expected value
         let expected_signed_data = proof.authenticator.signed_data();
-        
+
         let sig = match ed25519_dalek::Signature::from_bytes(&proof.authenticator.sig) {
             Ok(s) => s,
-            Err(_) => return true,  // Invalid format is a mismatch
+            Err(_) => return true, // Invalid format is a mismatch
         };
 
         // If signature is valid for the data, then there's no mismatch
@@ -322,12 +308,12 @@ impl Node {
     fn verify_invalid_ack_proof(
         &self,
         proof: &Proof,
-        _faulty_pk: &ed25519_dalek::PublicKey
+        _faulty_pk: &ed25519_dalek::PublicKey,
     ) -> bool {
         // For ACK proofs, we need the original send message and the ACK
         // This is harder to verify without more context
         // For now, accept if authenticator is valid (already verified above)
-        
+
         if proof.log_suffix.is_some() {
             true
         } else {
@@ -339,7 +325,7 @@ impl Node {
     fn verify_missing_entries_proof(
         &self,
         proof: &Proof,
-        _faulty_pk: &ed25519_dalek::PublicKey
+        _faulty_pk: &ed25519_dalek::PublicKey,
     ) -> bool {
         // Verify that there's a gap in the log
         let log_suffix = match &proof.log_suffix {
@@ -368,11 +354,9 @@ impl Node {
 
     /// Propagate exposure proof to witnesses
     pub fn propagate_exposure_proof(&self, proof: &Proof) -> std::io::Result<()> {
-        let msg = PeerReviewMsg::ProofBroadcast(
-            crate::types::messages::ProofBroadcast {
-                proof: proof.clone(),
-            }
-        );
+        let msg = PeerReviewMsg::ProofBroadcast(crate::types::messages::ProofBroadcast {
+            proof: proof.clone(),
+        });
 
         let witnesses = self.get_witnesses(proof.faulty_node);
         for witness_id in witnesses {
@@ -386,11 +370,9 @@ impl Node {
         let witnesses = self.get_witnesses(proof.faulty_node);
 
         for witness_id in witnesses {
-            let msg = PeerReviewMsg::ProofBroadcast(
-                crate::types::messages::ProofBroadcast {
-                    proof: proof.clone(),
-                }
-            );
+            let msg = PeerReviewMsg::ProofBroadcast(crate::types::messages::ProofBroadcast {
+                proof: proof.clone(),
+            });
             let _ = self.send(witness_id, msg);
         }
     }
@@ -399,12 +381,13 @@ impl Node {
         &mut self,
         faulty_node: NodeId,
         auth: Authenticator,
-        reason: &str
+        reason: &str,
     ) {
         self.set_peer_status(faulty_node, PeerStatus::Exposed);
-        
+
         // TODO Why 5?
-        let logs = self.logger
+        let logs = self
+            .logger
             .get_log(self.logger.s_k.saturating_sub(5), self.logger.s_k)
             .unwrap_or_default();
 
@@ -422,18 +405,15 @@ impl Node {
         self.add_proof(&faulty_node, proof);
     }
 
-    pub fn mark_as_exposed(
-        &mut self,
-        faulty_node: NodeId,
-        auth: Authenticator,
-    ) {
+    pub fn mark_as_exposed(&mut self, faulty_node: NodeId, auth: Authenticator) {
         self.set_peer_status(faulty_node, PeerStatus::Exposed);
-        
+
         // TODO Why 10?
-        let logs = self.logger
+        let logs = self
+            .logger
             .get_log(self.logger.s_k.saturating_sub(10), self.logger.s_k)
             .unwrap_or_default();
-        
+
         let proof = Proof {
             accuser_node: self.id,
             faulty_node,
@@ -443,7 +423,7 @@ impl Node {
             reason: None,
             challenge_key: None,
         };
-        
+
         self.broadcast_exposure_proof(&proof);
         self.add_proof(&faulty_node, proof);
     }

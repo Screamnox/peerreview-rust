@@ -3,10 +3,13 @@ use ed25519_dalek::{Keypair, PublicKey};
 use std::collections::HashMap;
 
 use crate::{
-    journal::Logger, 
+    journal::Logger,
+    network::NetworkLayer,
     protocols::audit::Snapshot,
-    network::NetworkLayer, 
-    types::{Challenge, PeerReviewMsg, Proof, messages::{Authenticator, ChallengeId, ChallengeKey}}
+    types::{
+        Challenge, PeerReviewMsg, Proof,
+        messages::{Authenticator, ChallengeId, ChallengeKey},
+    },
 };
 
 /// Seuil d'authenticators avant de challenger
@@ -29,7 +32,7 @@ pub struct PeerInfo {
     pub public_key: PublicKey,
     pub status: PeerStatus,
     pub witnesses: Vec<NodeId>,
-    pub challenges: HashMap<ChallengeKey, Challenge>,   // TODO maybe just vec
+    pub challenges: HashMap<ChallengeKey, Challenge>, // TODO maybe just vec
     pub proofs: Vec<Proof>,
     pub last_audit_seq: usize,
 }
@@ -49,7 +52,7 @@ pub struct Node {
     pub witnesses: Vec<NodeId>,
 
     pub network_layer: NetworkLayer,
-    
+
     pub next_challenge_id: ChallengeId,
 
     /// Témoins
@@ -65,7 +68,13 @@ impl Node {
     /// * `keypair` - Paire de clés Ed25519 pour les signatures
     /// * `logger` - Journal initialisé
     /// * `witnesses` - Liste des IDs des témoins (doit être un sous-ensemble des peers)
-    pub fn new(id: NodeId, keypair: Keypair, logger: Logger, witnesses: Vec<NodeId>, network_layer: NetworkLayer) -> Self {
+    pub fn new(
+        id: NodeId,
+        keypair: Keypair,
+        logger: Logger,
+        witnesses: Vec<NodeId>,
+        network_layer: NetworkLayer,
+    ) -> Self {
         Self {
             id,
             keypair,
@@ -99,12 +108,10 @@ impl Node {
                 .map(|p| p.witnesses.clone())
                 .unwrap_or_default()
         };
-        
+
         // Filter out self - a node cannot be its own witness
         // SHOULD NOT happen
-        witnesses.into_iter()
-            .filter(|&w| w != self.id)
-            .collect()
+        witnesses.into_iter().filter(|&w| w != self.id).collect()
     }
 
     /// Ajoute un pair connu après connexion TCP
@@ -113,12 +120,7 @@ impl Node {
     /// * `id` - ID du pair
     /// * `public_key` - Clé publique Ed25519 du pair
     /// * `socket` - Socket TCP connectée
-    pub fn add_peer(
-        &mut self,
-        id: NodeId,
-        public_key: PublicKey,
-        witnesses: Vec<NodeId>,
-    ) {
+    pub fn add_peer(&mut self, id: NodeId, public_key: PublicKey, witnesses: Vec<NodeId>) {
         self.peers.insert(
             id,
             PeerInfo {
@@ -201,7 +203,7 @@ impl Node {
     pub fn add_challenge(&mut self, challenge: Challenge) {
         if let Some(peer) = self.peers.get_mut(&challenge.target) {
             let key = challenge.key();
-            
+
             // Check if challenge with same key already exists
             if peer.challenges.contains_key(&key) {
                 println!(
@@ -209,7 +211,7 @@ impl Node {
                     self.id, key.0, key.1, challenge.target
                 );
             }
-            
+
             peer.challenges.insert(key, challenge);
         } else {
             println!(
@@ -220,23 +222,21 @@ impl Node {
     }
 
     /// Supprimer un challenge spécifique
-    pub fn remove_challenge(
-        &mut self, 
-        peer_id: NodeId, 
-        key: ChallengeKey
-    ) -> Option<Challenge> {
-        self.peers
-            .get_mut(&peer_id)
-            .and_then(|peer| {
-                let removed = peer.challenges.remove(&key);
-                if removed.is_some() {
-                    println!(
-                        "[Node {}] Removed challenge ({}, {}) for peer {} (remaining: {})",
-                        self.id, key.0, key.1, peer_id, peer.challenges.len()
-                    );
-                }
-                removed
-            })
+    pub fn remove_challenge(&mut self, peer_id: NodeId, key: ChallengeKey) -> Option<Challenge> {
+        self.peers.get_mut(&peer_id).and_then(|peer| {
+            let removed = peer.challenges.remove(&key);
+            if removed.is_some() {
+                println!(
+                    "[Node {}] Removed challenge ({}, {}) for peer {} (remaining: {})",
+                    self.id,
+                    key.0,
+                    key.1,
+                    peer_id,
+                    peer.challenges.len()
+                );
+            }
+            removed
+        })
     }
 
     /// Supprimer l'ensemble des challenges sur une cible
@@ -246,7 +246,10 @@ impl Node {
             .map(|peer| {
                 let count = peer.challenges.len();
                 peer.challenges.clear();
-                println!("[Node {}] Cleared {} challenges for peer {}", self.id, count, peer_id);
+                println!(
+                    "[Node {}] Cleared {} challenges for peer {}",
+                    self.id, count, peer_id
+                );
                 count
             })
             .unwrap_or(0)
@@ -261,9 +264,7 @@ impl Node {
     }
 
     pub fn get_proofs(&self, peer_id: NodeId) -> Option<Vec<Proof>> {
-        self.peers
-            .get(&peer_id)
-            .map(|peer| peer.proofs.clone())
+        self.peers.get(&peer_id).map(|peer| peer.proofs.clone())
     }
 
     pub fn add_proof(&mut self, peer_id: &NodeId, proof: Proof) {
@@ -275,7 +276,7 @@ impl Node {
                 println!(
                     "[Node {}] Warning: Cannot add proof for unknown peer {}",
                     self.id, peer_id
-                );  
+                );
             }
         }
     }
@@ -284,10 +285,11 @@ impl Node {
     /// Returns true if threshold is exceeded and a challenge should be sent
     /// (send_consistency_challenge)
     pub fn store_authenticator(&mut self, peer_id: NodeId, auth: Authenticator) -> bool {
-        let auths = self.stored_authenticators
+        let auths = self
+            .stored_authenticators
             .entry(peer_id)
             .or_insert_with(Vec::new);
-        
+
         auths.push(auth);
 
         auths.len() >= CHALLENGE_THRESHOLD

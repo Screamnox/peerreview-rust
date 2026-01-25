@@ -2,7 +2,12 @@ use bincode::{Decode, Encode};
 use ed25519_dalek::{Keypair, PublicKey};
 use std::collections::HashMap;
 
-use crate::{journal::Logger, types::PeerReviewMsg};
+use crate::{
+    journal::Logger, protocols::audit::Snapshot, types::{Challenge, PeerReviewMsg, Proof, messages::{Authenticator, ChallengeId, ChallengeKey}}
+};
+
+/// Seuil d'authenticators avant de challenger
+const CHALLENGE_THRESHOLD: usize = 10;
 
 pub type NodeId = u32;
 
@@ -21,6 +26,9 @@ pub struct PeerInfo {
     pub public_key: PublicKey,
     pub status: PeerStatus,
     pub witnesses: Vec<NodeId>,
+    pub challenges: HashMap<ChallengeKey, Challenge>,   // TODO maybe just vec
+    pub proofs: Vec<Proof>,
+    pub last_audit_seq: usize,
 }
 
 /// Noeud PeerReview
@@ -36,6 +44,12 @@ pub struct Node {
     pub logger: Logger,
     pub peers: HashMap<NodeId, PeerInfo>,
     pub witnesses: Vec<NodeId>,
+
+    pub next_challenge_id: ChallengeId,
+
+    /// Témoins
+    pub stored_authenticators: HashMap<NodeId, Vec<Authenticator>>,
+    pub snapshots: HashMap<NodeId, Vec<Snapshot>>,
 }
 
 impl Node {
@@ -53,6 +67,9 @@ impl Node {
             logger, // TODO: Ouverture via le path
             peers: HashMap::new(),
             witnesses,
+            next_challenge_id: 0,
+            stored_authenticators: HashMap::new(),
+            snapshots: HashMap::new(),
         }
     }
 
@@ -64,6 +81,19 @@ impl Node {
     /// Récupère le dernier hash du logger de ce noeud
     pub fn get_last_hash(&self) -> [u8; 32] {
         self.logger.get_current_hash()
+    }
+
+    /// Récupère les témoins d'un noeud
+    pub fn get_witnesses(&self, peer_id: NodeId) -> Vec<NodeId> {
+        if peer_id == self.id {
+            return self.witnesses.clone()
+        }
+
+        // TODO: Fix safer way
+        self.peers
+            .get(&peer_id)
+            .map(|p| p.witnesses.clone())
+            .unwrap_or_default()
     }
 
     /// Ajoute un pair connu après connexion TCP
@@ -85,6 +115,9 @@ impl Node {
                 public_key,
                 status: PeerStatus::Trusted,
                 witnesses,
+                challenges: HashMap::new(),
+                proofs: Vec::new(),
+                last_audit_seq: 0,
             },
         );
         println!("[Noeud {}] Pair {} ajouté (statut: Trusted)", self.id, id);
@@ -100,13 +133,21 @@ impl Node {
         self.peers.get(&peer_id).map(|p| p.status)
     }
 
+    /// Récupère la dernière séquence d'audit d'un pair
+    pub fn get_peer_last_audit_seq(&self, peer_id: NodeId) -> Option<usize> {
+        self.peers.get(&peer_id).map(|p| p.last_audit_seq)
+    }
+
+    /// Modifie la dernière séquence d'audit d'un pair
+    pub fn set_peer_last_audit_seq(&mut self, peer_id: NodeId, seq: usize) {
+        if let Some(peer) = self.peers.get_mut(&peer_id) {
+            peer.last_audit_seq = seq;
+        }
+    }
+
     /// Modifie le statut d'un pair
     pub fn set_peer_status(&mut self, peer_id: NodeId, status: PeerStatus) {
         if let Some(peer) = self.peers.get_mut(&peer_id) {
-            println!(
-                "[Noeud {}] Statut du pair {} modifié: {:?} -> {:?}",
-                self.id, peer_id, peer.status, status
-            );
             peer.status = status;
         }
     }
@@ -125,8 +166,168 @@ impl Node {
             .collect()
     }
 
-    // TODO: on_message
-    pub fn on_message(peer_id: NodeId, msg: PeerReviewMsg) {
+    /// Génrer un challenge ID unique (localement ; pour ce noeud)
+    pub fn generate_challenge_id(&mut self) -> ChallengeId {
+        let id = self.next_challenge_id;
+        self.next_challenge_id += 1;
+        id
+    }
+
+    /// Récupérer tous les challenges concernant un pair
+    pub fn get_challenges(&self, peer_id: NodeId) -> Option<Vec<Challenge>> {
+        self.peers
+            .get(&peer_id)
+            .map(|peer| peer.challenges.values().cloned().collect())
+    }
+
+    /// Récupérer un challenge spécifique concernant un pair
+    pub fn get_challenge(&self, peer_id: NodeId, key: ChallengeKey) -> Option<Challenge> {
+        self.peers
+            .get(&peer_id)
+            .and_then(|peer| peer.challenges.get(&key).cloned())
+    }
+
+    /// Ajouter un challenge
+    pub fn add_challenge(&mut self, challenge: Challenge) {
+        if let Some(peer) = self.peers.get_mut(&challenge.target) {
+            let key = challenge.key();
+            
+            // Check if challenge with same key already exists
+            if peer.challenges.contains_key(&key) {
+                println!(
+                    "[Node {}] Warning: Challenge ({}, {}) for peer {} already exists, replacing",
+                    self.id, key.0, key.1, challenge.target
+                );
+            }
+            
+            peer.challenges.insert(key, challenge);
+        } else {
+            println!(
+                "[Node {}] Warning: Cannot add challenge for unknown peer {}",
+                self.id, challenge.target
+            );
+        }
+    }
+
+    /// Supprimer un challenge spécifique
+    pub fn remove_challenge(
+        &mut self, 
+        peer_id: NodeId, 
+        key: ChallengeKey
+    ) -> Option<Challenge> {
+        self.peers
+            .get_mut(&peer_id)
+            .and_then(|peer| {
+                let removed = peer.challenges.remove(&key);
+                if removed.is_some() {
+                    println!(
+                        "[Node {}] Removed challenge ({}, {}) for peer {} (remaining: {})",
+                        self.id, key.0, key.1, peer_id, peer.challenges.len()
+                    );
+                }
+                removed
+            })
+    }
+
+    /// Supprimer l'ensemble des challenges sur une cible
+    pub fn remove_all_challenges(&mut self, peer_id: NodeId) -> usize {
+        self.peers
+            .get_mut(&peer_id)
+            .map(|peer| {
+                let count = peer.challenges.len();
+                peer.challenges.clear();
+                println!("[Node {}] Cleared {} challenges for peer {}", self.id, count, peer_id);
+                count
+            })
+            .unwrap_or(0)
+    }
+
+    /// Récupérer le nombre de challenge sur une cible
+    pub fn get_challenge_count(&self, peer_id: NodeId) -> usize {
+        self.peers
+            .get(&peer_id)
+            .map(|peer| peer.challenges.len())
+            .unwrap_or(0)
+    }
+
+    pub fn get_proofs(&self, peer_id: NodeId) -> Option<Vec<Proof>> {
+        self.peers
+            .get(&peer_id)
+            .map(|peer| peer.proofs.clone())
+    }
+
+    pub fn add_proof(&mut self, peer_id: &NodeId, proof: Proof) {
+        match self.peers.get_mut(peer_id) {
+            Some(peer) => {
+                peer.proofs.push(proof);
+            }
+            None => {
+                println!(
+                    "[Node {}] Warning: Cannot add proof for unknown peer {}",
+                    self.id, peer_id
+                );  
+            }
+        }
+    }
+
+    /// Stores an authenticator for a peer and checks if challenge threshold is exceeded
+    /// Returns true if threshold is exceeded and a challenge should be sent
+    /// (send_consistency_challenge)
+    pub fn store_authenticator(&mut self, peer_id: NodeId, auth: Authenticator) -> bool {
+        let auths = self.stored_authenticators
+            .entry(peer_id)
+            .or_insert_with(Vec::new);
+        
+        auths.push(auth);
+
+        auths.len() >= CHALLENGE_THRESHOLD
+    }
+
+    /// Clears authenticators for a node
+    /// Note: Called after a successful consistency verification
+    /// Note: If a fault is detected, authenticators are kept as PROOFS
+    /// Returns the number of cleared authenticators
+    pub fn clear_authenticators(&mut self, peer_id: NodeId) -> usize {
+        if let Some(auths) = self.stored_authenticators.get_mut(&peer_id) {
+            let count = auths.len();
+            auths.clear();
+            count
+        } else {
+            0
+        }
+    }
+
+    /// Gets the current count of stored authenticators for a peer
+    pub fn get_authenticator_count(&self, peer_id: NodeId) -> usize {
+        self.stored_authenticators
+            .get(&peer_id)
+            .map(|auths| auths.len())
+            .unwrap_or(0)
+    }
+
+    /// Gets a reference to stored authenticators for a peer
+    pub fn get_stored_authenticators(&self, peer_id: NodeId) -> Option<&Vec<Authenticator>> {
+        self.stored_authenticators.get(&peer_id)
+    }
+
+    // TODO
+    pub fn send(&self, peer_id: NodeId, msg: PeerReviewMsg) -> std::io::Result<()> {
         unimplemented!();
+    }
+
+    pub fn recv(&self, from_peer: NodeId, msg: PeerReviewMsg) -> std::io::Result<()> {
+        unimplemented!();
+    }
+
+    pub fn send_to_witnesses(
+        &mut self,
+        peer_id: NodeId,
+        pr_msg: PeerReviewMsg,
+    ) -> std::io::Result<()> {
+        for witness_id in self.get_witnesses(peer_id) {
+            self.send(witness_id, pr_msg.clone())?;
+        }
+
+        Ok(())
     }
 }

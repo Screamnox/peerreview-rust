@@ -1,331 +1,181 @@
-use crate::journal::entry::{LogEntry, LogType};
 use ed25519_dalek::Verifier;
 use sha2::{Digest, Sha256};
 
-use super::node::PeerReviewNode;
+use crate::journal::entry::{LogEntry, LogType};
+use crate::types::messages::Authenticator;
+use crate::types::{
+    messages::{AuditRequest, AuditResponse},
+    node::{Node, NodeId},
+    PeerReviewMsg,
+};
 
-/// Challenge de consistency envoyé par un témoin
-#[derive(Debug, Clone)]
-pub struct ConsistencyChallenge {
-    pub witness_id: u32,
-    pub target_id: u32,
-    pub seq_nums: Vec<usize>, // Numéros de séquence des authenticators stockés
-}
-
-impl PeerReviewNode {
-    /// [TÉMOIN] Challenge automatique quand le seuil d'authenticators est atteint
-    /// Le témoin demande les logs correspondants aux authenticators stockés
-    pub fn challenge_witnessed_node(
+impl Node {
+    /// Witness - Send Challenge
+    /// Note: Called when authenticator threshold is reached
+    pub fn send_consistency_challenge(
         &mut self,
-        observed_node_id: u32,
-    ) -> std::io::Result<Option<ConsistencyChallenge>> {
-        if !self.should_challenge(observed_node_id) {
-            return Ok(None);
-        }
+        target: NodeId,
+    ) -> std::io::Result<()> {
+        let auths = match self.stored_authenticators.get(&target) {
+            Some(a) => a,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Empty authenticator store",
+                ));
+            },
+        };
 
-        let stored_auths = self.stored_authenticators.get(&observed_node_id).unwrap();
-        let seq_nums: Vec<usize> = stored_auths.iter().map(|a| a.seq_num).collect();
+        let min_seq = auths.iter().map(|a| a.seq).min().unwrap();
+        let max_seq = auths.iter().map(|a| a.seq).max().unwrap();
 
-        println!(
-            "[Témoin {}] Challenge du nœud {} pour {} authenticators",
-            self.node_id,
-            observed_node_id,
-            seq_nums.len()
-        );
+        let msg = PeerReviewMsg::ConsistencyRequest(AuditRequest { 
+            min_seq,
+            max_seq, 
+        });
 
-        // Logger le challenge
-        let challenge_msg = format!("CONSISTENCY_CHALLENGE: {} logs demandés", seq_nums.len());
-        self.logger.log_send(observed_node_id, &challenge_msg, &mut self.keypair)?;
-
-        Ok(Some(ConsistencyChallenge {
-            witness_id: self.node_id,
-            target_id: observed_node_id,
-            seq_nums,
-        }))
+        self.send(target, msg)
     }
 
-    /// [NŒUD SURVEILLÉ] Répond au challenge d'un témoin avec les logs demandés
-    pub fn respond_to_challenge(
+    /// Target - Recv challenge
+    pub fn recv_consistency_challenge(
         &mut self,
-        challenge: &ConsistencyChallenge,
-    ) -> std::io::Result<Vec<LogEntry>> {
-        println!(
-            "[Nœud {}] Réponse au challenge du témoin {} pour {} logs",
-            self.node_id,
-            challenge.witness_id,
-            challenge.seq_nums.len()
-        );
+        sender: NodeId,
+        pr_msg: &PeerReviewMsg,
+    ) -> std::io::Result<()> {
+        let req = match pr_msg {
+            PeerReviewMsg::ConsistencyRequest(r) => r,
+            _ => return Ok(()),     // TODO improve error
+        };
 
-        // Récupérer tous les logs demandés
-        let all_logs = self.logger.get_log(self.logger.s_k - self.logger.line_max + 1, self.logger.s_k)?;
-        let mut requested_logs = Vec::new();
+        // TODO
+        // If sender is not one of my witness do not answer
 
-        for seq in &challenge.seq_nums {
-            if let Some(log) = all_logs.iter().find(|l| l.s_k == *seq) {
-                requested_logs.push(log.clone());
-            }
-        }
+        let logs = self.logger.get_log(req.min_seq, req.max_seq)?;
+        // TODO Maybe filter before not after
 
-        // Logger la réponse
-        let response_msg = format!(
-            "CONSISTENCY_RESPONSE: {} logs envoyés",
-            requested_logs.len()
-        );
-        self.logger.log_send(challenge.witness_id, &response_msg, &mut self.keypair)?;
+        let response = PeerReviewMsg::ConsistencyResponse(AuditResponse { 
+            entries: logs,
+            prev_hash: self.logger.get_current_hash(),  // it is last_hash not prev_hash
+        });
 
-        Ok(requested_logs)
+        // TODO: Is it necessary to log it? In the previous code it was
+        // self.logger.log_send(challenge.witness_id, &response_msg, &mut self.keypair)?;
+
+        self.send(sender, response)
     }
 
-    /// [TÉMOIN] Vérifie la chaîne de hash et les signatures des logs reçus
-    /// Retourne true si tout est correct, false si une incohérence est détectée
-    pub fn verify_logs_as_witness(
+    /// Witness - Verify response
+    pub fn verify_consistency_response(
         &mut self,
-        observed_node_id: u32,
-        received_logs: &[LogEntry],
+        target: NodeId,
+        pr_msg: &PeerReviewMsg,
     ) -> bool {
-        println!(
-            "[Témoin {}] Vérification de {} logs du nœud {}",
-            self.node_id,
-            received_logs.len(),
-            observed_node_id
-        );
-
-        // Récupérer les authenticators stockés pour ce nœud
-        let stored_auths = match self.stored_authenticators.get(&observed_node_id) {
-            Some(auths) => auths,
-            None => {
-                println!(
-                    "[Témoin {}] Aucun authenticator stocké pour le nœud {}",
-                    self.node_id, observed_node_id
-                );
-                return false;
-            }
+        let response = match pr_msg {
+            PeerReviewMsg::ConsistencyResponse(r) => r,
+            _ => return false,
         };
 
-        // Récupérer la clé publique du nœud surveillé
-        let public_key = match self.peer_public_keys.get(&observed_node_id) {
-            Some(key) => key,
-            None => {
-                println!(
-                    "[Témoin {}] Clé publique du nœud {} inconnue",
-                    self.node_id, observed_node_id
-                );
-                return false;
-            }
+        let auths = match self.stored_authenticators.get(&target) {
+            Some(a) => a,
+            None => return false,
         };
 
-        // Vérifier chaque log
-        for log_entry in received_logs {
-            // Trouver l'authenticator correspondant
-            let stored_auth = match stored_auths.iter().find(|a| a.seq_num == log_entry.s_k) {
-                Some(auth) => auth,
+        let public_key = match self.get_peer_public_key(target) {
+            Some(pk) => pk.clone(),
+            None => return false,
+        };
+
+        for entry in &response.entries {
+            let auth = match auths.iter().find(|a| a.seq == entry.s_k) {
+                Some(a) => a,
                 None => {
-                    println!(
-                        "[Témoin {}] ✗ Aucun authenticator stocké pour seq={}",
-                        self.node_id, log_entry.s_k
-                    );
-                    self.mark_as_exposed(observed_node_id, "Numéro de séquence non trouvé");
+                    self.mark_as_exposed(
+                        target,
+                        Authenticator { seq: 0, hash: [0u8; 32], sig: [0u8; 64]}
+                    );   // TODO check is it possible
                     return false;
                 }
             };
 
-            // Vérifier que la signature stockée correspond à celle du log
-            if stored_auth.signature != log_entry.sig {
-                println!(
-                    "[Témoin {}] ✗ Signature différente pour seq={}: attendu {} != reçu {}",
-                    self.node_id,
-                    log_entry.s_k,
-                    hex::encode(&stored_auth.signature[..8]),
-                    hex::encode(&log_entry.sig[..8])
-                );
-                self.mark_as_exposed(observed_node_id, "Signature modifiée");
+            if auth.sig != entry.sig {
+                self.mark_as_exposed(target, auth.clone());
                 return false;
             }
 
-            // Recalculer le hash et vérifier
-            if !self.verify_log_hash(log_entry, received_logs) {
-                println!(
-                    "[Témoin {}] ✗ Hash invalide pour seq={}",
-                    self.node_id, log_entry.s_k
-                );
-                self.mark_as_exposed(observed_node_id, "Chaîne de hash brisée");
+            if !verify_log_hash(entry, &response.entries) {
+                self.mark_as_exposed(target, auth.clone());
                 return false;
             }
 
-            // Vérifier la signature Ed25519
-            let mut signed_data = [0u8; 40];
-            signed_data[..8].copy_from_slice(&log_entry.s_k.to_be_bytes());
-            signed_data[8..].copy_from_slice(&log_entry.hash);
-
-            let signature_obj = match ed25519_dalek::Signature::from_bytes(&log_entry.sig) {
-                Ok(sig) => sig,
-                Err(_) => {
-                    println!(
-                        "[Témoin {}] ✗ Format de signature invalide pour seq={}",
-                        self.node_id, log_entry.s_k
-                    );
-                    self.mark_as_exposed(observed_node_id, "Format de signature invalide");
-                    return false;
-                }
-            };
-
-            if public_key.verify(&signed_data, &signature_obj).is_err() {
-                println!(
-                    "[Témoin {}] ✗ Signature Ed25519 invalide pour seq={}",
-                    self.node_id, log_entry.s_k
-                );
-                self.mark_as_exposed(observed_node_id, "Signature Ed25519 invalide");
+            if !verify_entry_signature(entry, &public_key) {
+                self.mark_as_exposed(target, auth.clone());
                 return false;
             }
         }
 
-        println!(
-            "[Témoin {}] ✓ Tous les logs du nœud {} sont valides",
-            self.node_id, observed_node_id
-        );
-        
-        // Nettoyer les authenticators après vérification réussie
-        self.clear_authenticators(observed_node_id);
+        self.clear_authenticators(target);
         
         true
     }
+}
 
-    /// Recalcule et vérifie le hash d'une entrée de log
-    fn verify_log_hash(&self, log_entry: &LogEntry, all_logs: &[LogEntry]) -> bool {
-        // Trouver le hash précédent (hk-1)
-        let prev_hash = if log_entry.s_k == 1 {
-            // Première entrée, utiliser HASH_INIT
-            [
-                0x3A, 0x92, 0x11, 0xDE, 0x77, 0xC4, 0x0B, 0xE8, 0x5F, 0xA2, 0x39, 0x6C, 0x00, 0x4D,
-                0x8B, 0x17, 0xD1, 0x20, 0xFE, 0x58, 0x93, 0xA7, 0x51, 0xCE, 0x29, 0x74, 0x66, 0x01,
-                0xB8, 0x42, 0xDA, 0x10,
-            ]
-        } else {
-            // Trouver l'entrée précédente
-            match all_logs.iter().find(|l| l.s_k == log_entry.s_k - 1) {
-                Some(prev) => prev.hash,
-                None => {
-                    println!(
-                        "[Témoin {}] Impossible de trouver l'entrée précédente (seq={})",
-                        self.node_id,
-                        log_entry.s_k - 1
-                    );
-                    return false;
-                }
-            }
-        };
+/* ==================
+ * HELPER FUNCTIONS
+ * ==================
+ */
 
-        // Calculer H(ck) où ck = {corr, [s_k_corr], msg}
-        let mut hasher = Sha256::new();
-        hasher.update(log_entry.corr.to_be_bytes());
-        if log_entry.log_type == LogType::Recv {
-            hasher.update(log_entry.s_k_corr.to_be_bytes());
+fn verify_log_hash(
+    entry: &LogEntry,
+    logs: &[LogEntry],
+) -> bool {
+    let prev_hash = if entry.s_k == 1 {
+        // TODO: implement LogEntry::hash_init()
+        [
+            0x3A, 0x92, 0x11, 0xDE, 0x77, 0xC4, 0x0B, 0xE8, 0x5F, 0xA2, 0x39, 0x6C, 0x00, 0x4D,
+            0x8B, 0x17, 0xD1, 0x20, 0xFE, 0x58, 0x93, 0xA7, 0x51, 0xCE, 0x29, 0x74, 0x66, 0x01,
+            0xB8, 0x42, 0xDA, 0x10,
+        ]
+    } else {
+        match logs.iter().find(|e| e.s_k == entry.s_k - 1) {
+            Some(e) => e.hash,
+            None => return false,
         }
-        hasher.update(log_entry.msg.as_bytes());
-        let c_k = hasher.finalize();
+    };
 
-        // Calculer hk = H(hk-1 || sk || log_type || H(ck))
-        hasher = Sha256::new();
-        hasher.update(prev_hash);
-        hasher.update(log_entry.s_k.to_be_bytes());
-        hasher.update((log_entry.log_type.clone() as u8).to_be_bytes());
-        hasher.update(c_k);
-        let computed_hash: [u8; 32] = hasher.finalize().into();
+    let mut hasher = Sha256::new();
+    hasher.update(entry.corr.to_be_bytes());
 
-        computed_hash == log_entry.hash
+    if entry.log_type == LogType::Recv {
+        hasher.update(entry.s_k_corr.to_be_bytes());
     }
 
-    /// Marque un nœud comme EXPOSED (fautif)
-    /// APPELLE le protocole Evidence pour propager les preuves
-    fn mark_as_exposed(&mut self, node_id: u32, reason: &str) {
-        // Déterminer le type de preuve selon la raison
-        use super::evidence::EvidenceType;
-        let evidence_type = if reason.contains("Signature") {
-            if reason.contains("Ed25519") {
-                EvidenceType::InvalidSignature
-            } else {
-                EvidenceType::SignatureMismatch
-            }
-        } else if reason.contains("hash") || reason.contains("Hash") {
-            EvidenceType::BrokenHashChain
-        } else {
-            EvidenceType::SignatureMismatch
-        };
+    hasher.update(entry.msg.as_bytes());
+    let c_k = hasher.finalize();
 
-        println!(
-            "\n[Consistency] Détection d'incohérence sur le nœud {}",
-            node_id
-        );
-        println!("[Consistency] Raison: {}", reason);
-        println!("[Consistency] Type de preuve: {:?}", evidence_type);
-        println!("[Consistency] → Appel du protocole Evidence pour propager les preuves\n");
+    let mut hasher = Sha256::new();
+    hasher.update(prev_hash);
+    hasher.update(entry.s_k.to_be_bytes());
+    hasher.update((entry.log_type as u8).to_be_bytes());
+    hasher.update(c_k);
 
-        // Appeler le protocole Evidence pour gérer l'exposition et diffuser les preuves
-        use super::node::DetectionState;
-        self.set_detection_state(node_id, DetectionState::Exposed);
-        
-        // Récupérer les logs comme preuve
-        let logs = self.logger.get_log(self.logger.s_k - 10 + 1, self.logger.s_k).unwrap_or_default();         // TODO: Why 10?
-        
-        // Créer une preuve d'exposition
-        use super::evidence::ExposureProof;
-        let proof = ExposureProof {
-            witness_id: self.node_id,
-            exposed_node_id: node_id,
-            evidence_type,
-            logs,
-            reason: reason.to_string(),
-        };
-        
-        // TOUJOURS propager la preuve via le protocole Evidence (même si déjà exposé)
-        self.propagate_exposure_proof_via_evidence(proof);
-        
-        if !self.exposed_nodes.contains(&node_id) {
-            self.exposed_nodes.push(node_id);
-            
-            println!(
-                "\n⚠️  [Témoin {}] NŒUD {} MARQUÉ COMME EXPOSED ⚠️",
-                self.node_id, node_id
-            );
-            println!("Raison: {}\n", reason);
-        }
-    }
+    let computed: [u8; 32] = hasher.finalize().into();
+    computed == entry.hash
+}
 
-    /// Propage une preuve d'exposition via le protocole Evidence
-    fn propagate_exposure_proof_via_evidence(&self, proof: super::evidence::ExposureProof) {
-        let witnesses = self.get_witnesses(proof.exposed_node_id);
+fn verify_entry_signature(
+    entry: &LogEntry,
+    public_key: &ed25519_dalek::PublicKey,
+) -> bool {
 
-        println!(
-            "[Consistency → Evidence] Diffusion de la preuve aux {} témoin(s) du nœud {}",
-            witnesses.len(),
-            proof.exposed_node_id
-        );
+    let mut signed = [0u8; 40];
+    signed[..8].copy_from_slice(&entry.s_k.to_be_bytes());
+    signed[8..].copy_from_slice(&entry.hash);
 
-        for witness_id in witnesses {
-            println!(
-                "[Consistency → Evidence] → Témoin {} : Preuve d'exposition (type: {:?})",
-                witness_id, proof.evidence_type
-            );
-            // Dans une vraie implémentation, envoyer via le réseau
-            // self.network.send_evidence_proof(witness_id, proof.clone());
-        }
-    }
+    let sig = match ed25519_dalek::Signature::from_bytes(&entry.sig) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
 
-    /// Retourne la liste des nœuds exposés
-    pub fn get_exposed_nodes(&self) -> &[u32] {
-        &self.exposed_nodes
-    }
-
-    /// Supprime les authenticators stockés pour un nœud après vérification réussie
-    /// Note: En cas de fraude détectée, les authenticators sont CONSERVÉS comme preuve
-    pub fn clear_authenticators(&mut self, node_id: u32) {
-        if let Some(auths) = self.stored_authenticators.get_mut(&node_id) {
-            let count = auths.len();
-            auths.clear();
-            println!(
-                "[Témoin {}] {} authenticators supprimés pour le nœud {} (mémoire libérée)",
-                self.node_id, count, node_id
-            );
-        }
-    }
+    public_key.verify(&signed, &sig).is_ok()
 }

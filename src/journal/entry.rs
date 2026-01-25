@@ -1,11 +1,12 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use bincode::{Decode, Encode};
 use std::fmt;
 
 use crate::journal::logger::NB_SEMICOL;
 
 /// Type d’action enregistrée : envoi ou réception
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode)]
 #[repr(u8)]
 pub enum LogType {
     Send = 0,
@@ -13,7 +14,7 @@ pub enum LogType {
 }
 
 /// Structure d'une entrée du journal
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct LogEntry {
     pub s_k: usize,        // numéro séquentiel (anciennement timestamp)
     pub log_type: LogType, // type d’opération

@@ -1,12 +1,15 @@
 use bincode::{Decode, Encode};
 use std::mem::size_of;
 
+use crate::journal::entry::LogEntry;
+
 use super::node::NodeId;
 
 /// ====================
 ///   Log / Commitment
 /// ====================
 
+/*
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub enum MsgType {
     Send = 0,
@@ -36,6 +39,7 @@ pub struct MsgLogEntry {
     pub sig: [u8; 64],
     pub content: MsgContent,
 }
+*/
 
 /// =================
 ///   Authenticator
@@ -79,101 +83,165 @@ impl Authenticator {
 ///   Challenge objects
 /// =====================
 
+pub type ChallengeId = u64;
+pub type ChallengeKey = (ChallengeId, NodeId);
+
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Challenge {
+    pub id: ChallengeId,
     pub challenger: NodeId,
     pub target: NodeId,
     pub kind: ChallengeKind,
 }
 
+impl Challenge {
+    pub fn key(&self) -> ChallengeKey {
+        (self.id, self.challenger)
+    }
+}
+
+/// Challenge Kind
 #[derive(Debug, Clone, Encode, Decode)]
-pub enum ChallengeKind {
-    /// Challenge d'audit
-    Audit {
-        min_auth: Authenticator,
-        max_auth: Authenticator,
-    },
-    /// Challenge d'envoi
-    Send {
-        message: String,
-        sender_auth: Authenticator,
-    },
+pub struct AuditChallenge {
+    pub min_auth: Authenticator,
+    pub max_auth: Authenticator,
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
-pub enum ChallengeResponse {
-    Audit {
-        entries: Vec<MsgLogEntry>,
-        prev_hash: [u8; 32],
-    },
-    Send {
-        ack_seq: usize,
-        ack_prev_hash: [u8; 32],
-        ack_signature: [u8; 64],
-    },
+pub struct SendChallenge {
+    pub message: SendMsg,
+    pub sender_auth: Authenticator,
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub enum ChallengeKind {
+    Audit(AuditChallenge),
+    Send(SendChallenge),
+}
+
+/// Challenge responses
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct AuditResponse {
+    pub entries: Vec<LogEntry>,
+    pub prev_hash: [u8; 32],
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct SendResponse {
+    pub auth: Authenticator,
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub enum ChallengeAnswer {
+    Audit(AuditResponse),
+    Send(SendResponse),
 }
 
 /// ================
 ///   Proof object
 /// ================
 
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+pub enum EvidenceType {
+    SignatureMismatch,      // Signature différente de l'authenticator stocké
+    BrokenHashChain,        // Chaîne de hash invalide
+    InvalidSignature,       // Signature Ed25519 invalide
+    InvalidAckResponse,     // Faute au challenge d'envoi
+    MissingLogEntries,      // Faute au challenge d'audit
+}
+
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Proof {
-    pub guilty_node: NodeId,
+    pub faulty_node: NodeId,
     pub accuser_node: NodeId,
-    pub authenticator: Authenticator, // Authenticator prouvant l'état fautif
-    pub log_suffix: Vec<MsgLogEntry>, // Suffixe divergent du journal
+    pub authenticator: Authenticator,       // Authenticator prouvant l'état fautif
+    pub log_suffix: Option<Vec<LogEntry>>,  // Suffixe divergent du journal
+    pub challenge_key: Option<ChallengeKey>,// Challenge qui a échoué
+    pub kind: Option<EvidenceType>,
+    pub reason: Option<String>,
 }
 
 /// =======================
 ///   PeerReview messages
 /// =======================
 
+/* Commitment */
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct SendMsg {
+    pub seq: usize,
+    pub prev_hash: [u8; 32],
+    pub sig: [u8; 64],
+    pub dest: NodeId,
+    pub msg: String,
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct AuthenticatorBroadcast {
+    pub auth: Authenticator,
+    pub auth_node: NodeId,
+}
+
+/* Audit */
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct AuditRequest {
+    pub min_seq: usize,
+    pub max_seq: usize,
+}
+
+/* Challenge */
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct ChallengeRequest {
+    pub challenge: Challenge,
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct ChallengeResponse {
+    pub challenge_key: ChallengeKey,
+    pub answer: ChallengeAnswer,
+}
+
+/* Evidence Transfer */
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct EvidenceRequest {
+    pub target: NodeId,
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct EvidenceResponse {
+    pub target: NodeId,
+    pub challenges: Vec<Challenge>,
+    pub proofs: Vec<Proof>,
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct ProofBroadcast {
+    pub proof: Proof,
+}
+
+/// PeerReview messages
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum PeerReviewMsg {
     /// === Commitment protocol ===
-    Send {
-        seq: usize,
-        prev_hash: [u8; 32],
-        sig: [u8; 64],
-        dest: NodeId,
-        msg: String,
-    },
+    Send(SendMsg),
+    Ack(SendMsg),
 
     /// === Consistency protocol ===
-    AuthenticatorBroadcast {
-        auth: Authenticator,
-        auth_node: NodeId,
-    },
+    ConsistencyRequest(AuditRequest),
+    ConsistencyResponse(AuditResponse),
+
+    /// === Consistency protocol ===
+    AuthenticatorBroadcast(AuthenticatorBroadcast),
 
     /// === Audit protocol ===
-    AuditRequest {
-        min_seq: usize,
-        max_seq: usize,
-    },
-    AuditResponse {
-        entries: Vec<MsgLogEntry>,
-        prev_hash: [u8; 32],
-    },
+    AuditRequest(AuditRequest),
+    AuditResponse(AuditResponse),
 
     /// === Challenge protocol ===
-    ChallengeRequest {
-        challenge: Challenge,
-    },
-    ChallengeResponse {
-        response: ChallengeResponse,
-    },
+    ChallengeRequest(ChallengeRequest),
+    ChallengeResponse(ChallengeResponse),
 
     /// === Evidence transfer protocol ===
-    EvidenceRequest {
-        target: NodeId,
-    },
-    EvidenceResponse {
-        target: NodeId,
-        challenges: Vec<Challenge>,
-        proofs: Vec<Proof>,
-    },
-    ProofBroadcast {
-        proof: Proof,
-    },
+    EvidenceRequest(EvidenceRequest),
+    EvidenceResponse(EvidenceResponse),
+    ProofBroadcast(ProofBroadcast),
 }

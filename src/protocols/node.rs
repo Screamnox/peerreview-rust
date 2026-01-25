@@ -1,7 +1,7 @@
 use ed25519_dalek::Keypair;
 use std::{collections::HashMap};
 
-use crate::{journal::Logger, protocols::audit::Snapchot};
+use crate::{journal::Logger, protocols::audit::Snapshot};
 
 /// Type de message : Send ou Recv
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -64,7 +64,7 @@ pub struct PeerReviewNode {
     /// Challenges en attente pour les nœuds suspects
     pub pending_challenges: HashMap<u32, Vec<PendingChallenge>>,
     /// Liste des snapchot des témoins
-    pub snapchot_list_witness: HashMap<u32, Vec<Snapchot>>
+    pub snapchot_list_witness: HashMap<u32, Vec<Snapshot>>
 }
 
 impl PeerReviewNode {

@@ -38,6 +38,7 @@ pub struct Config {
     pub network: NetworkConfig,
     pub timers: TimersConfig,
     pub witnesses: WitnessesConfig,
+    pub watched: WatchedConfig,
 }
 
 /// Configuration spécifique au noeud
@@ -90,6 +91,12 @@ pub struct TimersConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessesConfig {
     /// Liste des IDs témoins existant dans peers.toml
+    pub list: Vec<NodeId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchedConfig {
+    /// Liste des IDs des noeuds observés existant dans peers.toml
     pub list: Vec<NodeId>,
 }
 
@@ -157,6 +164,9 @@ impl Config {
             witnesses: WitnessesConfig {
                 list: Vec::new(), // À remplir manuellement
             },
+            watched: WatchedConfig { 
+                list: Vec::new(),
+            }
         }
     }
 }

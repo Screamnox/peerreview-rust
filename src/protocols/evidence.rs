@@ -42,6 +42,9 @@ impl Node {
     pub fn periodic_evidence_collection(&mut self) -> std::io::Result<()> {
         // For each node we communicate with (directly or indirectly)
         for (peer_id, _) in self.peers.clone() {
+            if peer_id == self.id {
+                continue;  // Skip ourselves, SHOULD NOT happen
+            }
             self.request_evidence_from_witnesses(peer_id)?;
         }
         Ok(())

@@ -3,7 +3,10 @@ use ed25519_dalek::{Keypair, PublicKey};
 use std::collections::HashMap;
 
 use crate::{
-    journal::Logger, protocols::audit::Snapshot, types::{Challenge, PeerReviewMsg, Proof, messages::{Authenticator, ChallengeId, ChallengeKey}}
+    journal::Logger, 
+    protocols::audit::Snapshot,
+    network::NetworkLayer, 
+    types::{Challenge, PeerReviewMsg, Proof, messages::{Authenticator, ChallengeId, ChallengeKey}}
 };
 
 /// Seuil d'authenticators avant de challenger
@@ -45,6 +48,8 @@ pub struct Node {
     pub peers: HashMap<NodeId, PeerInfo>,
     pub witnesses: Vec<NodeId>,
 
+    pub network_layer: NetworkLayer,
+    
     pub next_challenge_id: ChallengeId,
 
     /// Témoins
@@ -60,13 +65,14 @@ impl Node {
     /// * `keypair` - Paire de clés Ed25519 pour les signatures
     /// * `logger` - Journal initialisé
     /// * `witnesses` - Liste des IDs des témoins (doit être un sous-ensemble des peers)
-    pub fn new(id: NodeId, keypair: Keypair, logger: Logger, witnesses: Vec<NodeId>) -> Self {
+    pub fn new(id: NodeId, keypair: Keypair, logger: Logger, witnesses: Vec<NodeId>, network_layer: NetworkLayer) -> Self {
         Self {
             id,
             keypair,
             logger, // TODO: Ouverture via le path
             peers: HashMap::new(),
             witnesses,
+            network_layer,
             next_challenge_id: 0,
             stored_authenticators: HashMap::new(),
             snapshots: HashMap::new(),
@@ -85,15 +91,20 @@ impl Node {
 
     /// Récupère les témoins d'un noeud
     pub fn get_witnesses(&self, peer_id: NodeId) -> Vec<NodeId> {
-        if peer_id == self.id {
-            return self.witnesses.clone()
-        }
-
-        // TODO: Fix safer way
-        self.peers
-            .get(&peer_id)
-            .map(|p| p.witnesses.clone())
-            .unwrap_or_default()
+        let witnesses = if peer_id == self.id {
+            self.witnesses.clone()
+        } else {
+            self.peers
+                .get(&peer_id)
+                .map(|p| p.witnesses.clone())
+                .unwrap_or_default()
+        };
+        
+        // Filter out self - a node cannot be its own witness
+        // SHOULD NOT happen
+        witnesses.into_iter()
+            .filter(|&w| w != self.id)
+            .collect()
     }
 
     /// Ajoute un pair connu après connexion TCP
@@ -117,10 +128,9 @@ impl Node {
                 witnesses,
                 challenges: HashMap::new(),
                 proofs: Vec::new(),
-                last_audit_seq: 0,
+                last_audit_seq: 1,
             },
         );
-        println!("[Noeud {}] Pair {} ajouté (statut: Trusted)", self.id, id);
     }
 
     /// Récupère la clé publique d'un pair (pour vérifications cryptographiques)
@@ -312,11 +322,12 @@ impl Node {
 
     // TODO
     pub fn send(&self, peer_id: NodeId, msg: PeerReviewMsg) -> std::io::Result<()> {
-        unimplemented!();
+        self.network_layer.send(peer_id, &msg)
     }
 
-    pub fn recv(&self, from_peer: NodeId, msg: PeerReviewMsg) -> std::io::Result<()> {
-        unimplemented!();
+    /// Note: Blocking call
+    pub fn recv(&self) -> std::io::Result<(NodeId, PeerReviewMsg)> {
+        self.network_layer.recv()
     }
 
     pub fn send_to_witnesses(

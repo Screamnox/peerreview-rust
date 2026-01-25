@@ -23,3 +23,6 @@ evidence_transfer_secs = 120
 # Liste des IDs des témoins de ce nœud
 # Ces noeuds doivent être présents dans peers.toml
 list = [43, 44]
+
+[watched]
+list = [41, 45]

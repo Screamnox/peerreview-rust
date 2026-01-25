@@ -27,3 +27,4 @@ target
 Cargo.lock
 *.log
 .vscode/
+.env/

@@ -6,6 +6,7 @@ use std::sync::mpsc::{self, Sender, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
+use crate::RuntimeTask;
 use crate::types::messages::PeerReviewMsg;
 use crate::types::node::NodeId;
 
@@ -32,9 +33,6 @@ struct NetworkState {
     /// Commands to send to the reactor
     command_tx: Sender<ReactorCommand>,
 
-    /// Received messages from peers
-    message_rx: Receiver<(NodeId, PeerReviewMsg)>,
-
     /// Waker to notify reactor of new commands
     waker: Arc<Waker>,
 
@@ -45,12 +43,13 @@ struct NetworkState {
 /// Network layer is a network wrapper for TCP stream peers
 pub struct NetworkLayer {
     state: Arc<NetworkState>,
+    message_rx: Receiver<(NodeId, PeerReviewMsg)>,
     reactor_handle: Option<JoinHandle<io::Result<()>>>
 }
 
 impl NetworkLayer {
     /// Create a new network layer and start reactor thread
-    pub fn new(initial_peers: HashMap<NodeId, std::net::TcpStream>) -> io::Result<Self> {
+    pub fn new(initial_peers: HashMap<NodeId, std::net::TcpStream>, task_tx:Sender<RuntimeTask>) -> io::Result<Self> {
         let poll = Poll::new()?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKE_TOKEN)?);
 
@@ -76,6 +75,7 @@ impl NetworkLayer {
                 token_to_peer: HashMap::new(),
                 command_rx,
                 message_tx,
+                task_tx,
                 peers: peers_clone,
                 next_token: 0,
             };
@@ -96,13 +96,13 @@ impl NetworkLayer {
 
         let state = Arc::new(NetworkState {
             command_tx,
-            message_rx,
             waker,
             peers,
         });
 
         Ok(Self {
             state,
+            message_rx,
             reactor_handle: Some(handle),
         })
     }
@@ -125,7 +125,7 @@ impl NetworkLayer {
     /// 
     /// Returns (peer_id, message) or error if reactor is closed
     pub fn recv(&self) -> io::Result<(NodeId, PeerReviewMsg)> {
-        self.state.message_rx.recv()
+        self.message_rx.recv()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Reactor closed"))
     }
     
@@ -133,7 +133,7 @@ impl NetworkLayer {
     /// 
     /// Returns Some((peer_id, message)) if a message is available, None otherwise
     pub fn try_recv(&self) -> io::Result<Option<(NodeId, PeerReviewMsg)>> {
-        match self.state.message_rx.try_recv() {
+        match self.message_rx.try_recv() {
             Ok(msg) => Ok(Some(msg)),
             Err(mpsc::TryRecvError::Empty) => Ok(None),
             Err(mpsc::TryRecvError::Disconnected) => {
@@ -184,6 +184,7 @@ struct Reactor {
     token_to_peer: HashMap<Token, NodeId>,
     command_rx: Receiver<ReactorCommand>,
     message_tx: Sender<(NodeId, PeerReviewMsg)>,
+    task_tx: Sender<RuntimeTask>,
     peers: Arc<Mutex<Vec<NodeId>>>,
     next_token: usize,
 }
@@ -322,6 +323,11 @@ impl Reactor {
                                 "Message receiver dropped"
                             ));
                         }
+
+                        // Send a signal to the runtime
+                        self.task_tx
+                            .send(RuntimeTask::ReceiveMessage)
+                            .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e))?;
                     }
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,

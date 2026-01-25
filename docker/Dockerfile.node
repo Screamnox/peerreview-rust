@@ -1,0 +1,23 @@
+FROM rust:1.90 as builder
+
+WORKDIR /usr/src/peerreview
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+
+WORKDIR /usr/src/peerreview
+
+COPY --from=builder /usr/src/peerreview/target/release/peerreview-rust /usr/local/bin/peerreview_node
+
+# Unsafe COPY, not for production
+COPY nodes/ ./nodes/
+
+COPY peers.toml ./
+
+EXPOSE 5001-5004
+
+ENTRYPOINT ["/usr/local/bin/peerreview_node"]

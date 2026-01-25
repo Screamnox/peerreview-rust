@@ -11,7 +11,7 @@ impl Node {
         &mut self,
         dest: NodeId,
         msg: &str,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<PeerReviewMsg> {
         let prev_hash = self.logger.get_current_hash();
 
         let sig =
@@ -25,7 +25,9 @@ impl Node {
             msg: msg.to_string(),
         });
 
-        self.send(dest, pr_msg)
+        self.send(dest, pr_msg.clone())?;
+
+        Ok(pr_msg)
     }
 
     /// Verify SEND (algorithm 3)
@@ -60,7 +62,7 @@ impl Node {
             Ok(s) => s,
             Err(_) => return false,
         };
-
+ 
         let sender_pk = match self.get_peer_public_key(sender_id) {
             Some(sender_public_key) => sender_public_key,
             None => return false,

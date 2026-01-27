@@ -51,6 +51,17 @@ pub enum RuntimeTask {
     // Shutdown,
 }
 
+#[derive(Debug)]
+pub enum ApplicationEvent {
+    Message {
+        from: NodeId,
+        payload: Vec<u8>,
+    },
+    PeerExposed {
+        peer: NodeId,
+    },
+}
+
 /// Tracks pending operations waiting for responses
 #[derive(Debug, Clone)]
 pub struct PendingOperation {
@@ -81,6 +92,8 @@ pub struct PeerReviewRuntime {
     shutdown_rx: Receiver<bool>,
     shutdown_tx: Sender<bool>,
 
+    app_event_tx: Sender<ApplicationEvent>,
+
     /// Pending operations waiting for responses
     pending_operations: Vec<PendingOperation>,
 
@@ -92,7 +105,7 @@ pub struct PeerReviewRuntime {
 
 impl PeerReviewRuntime {
     /// Create a new PeerReview runtime from configuration
-    pub fn new(config_file: &str) -> std::io::Result<Self> {
+    pub fn new(config_file: &str) -> std::io::Result<(Self, Receiver<ApplicationEvent>)> {
         let config = Config::from_file(config_file)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
@@ -121,6 +134,7 @@ impl PeerReviewRuntime {
         // Channels
         let (task_tx, task_rx) = channel::<RuntimeTask>();
         let (shutdown_tx, shutdown_rx) = channel::<bool>();
+        let (app_event_tx, app_event_rx) = channel::<ApplicationEvent>();
 
         // Node
         let mut node = Node::new(
@@ -137,17 +151,18 @@ impl PeerReviewRuntime {
 
         let now = Instant::now();
 
-        Ok(Self {
+        Ok((Self {
             node,
             task_rx,
             task_tx,
             shutdown_rx,
             shutdown_tx,
+            app_event_tx,
             pending_operations: Vec::new(),
             last_audit: now,
             last_consistency_check: now,
             last_evidence_collection: now,
-        })
+        }, app_event_rx))
     }
 
     /// Get a sender for submitting tasks to the runtime
@@ -289,6 +304,12 @@ impl PeerReviewRuntime {
                 println!("[Runtime] Received SEND from {}", sender);
                 // TODO return challenge id ack
                 self.node.recv_message(sender, &msg)?;
+
+                let payload = send_msg.msg.clone().into_bytes();
+                let _ = self.app_event_tx.send(ApplicationEvent::Message {
+                    from: sender,
+                    payload,
+                });
             }
 
             PeerReviewMsg::Ack(ref ack_msg) => {
@@ -421,6 +442,10 @@ impl PeerReviewRuntime {
 
                 self.node
                     .recv_exposure_proof(sender, &proof_broadcast.proof);
+
+                self.app_event_tx.send(ApplicationEvent::PeerExposed {
+                    peer: proof_broadcast.proof.faulty_node,
+                }).ok();
             }
         }
 

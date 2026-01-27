@@ -2,51 +2,78 @@ use std::env;
 use std::thread;
 use std::time::Duration;
 
-use peerreview_rust::types::Config;
-use peerreview_rust::{PeerReviewRuntime, RuntimeTask};
+use overlay::node::OverlayNode;
+use overlay::payload::OverlayPayload;
+use overlay::tree::build_trees;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+use peerreview_rust::PeerReviewRuntime;
+use peerreview_rust::types::Config;
+use peerreview_rust::types::node::NodeId;
+
+mod overlay;
+
+fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 2 {
-        eprintln!("Usage: {} <node_config.toml>", args[0]);
+
+    if args.len() != 3 {
+        eprintln!(
+            "Usage: {} <node_config.toml> <num_nodes>",
+            args[0]
+        );
         std::process::exit(1);
     }
-    let config_file = &args[1];
-    let config = Config::from_file(config_file)?;
 
-    // Init peerreview runtime
-    let runtime = PeerReviewRuntime::new(config_file).unwrap();
+    let config_path = &args[1];
+    let config = Config::from_file(config_path).unwrap();
 
-    // PeerReview channels
-    let task_sender = runtime.get_task_sender();
-    let shutdown_sender = runtime.get_shutdown_sender();
+    let num_nodes: usize = args[2]
+        .parse()
+        .expect("num_nodes must be an integer");
 
-    // Spawn runtime in separate thread
-    let runtime_handle = thread::spawn(move || {
-        runtime.run().expect("Runtime failed");
+    // --- Start PeerReview runtime ---
+    let (runtime, app_rx) = PeerReviewRuntime::new(config_path)?;
+    let runtime_tx = runtime.get_task_sender();
+
+    let pr_thread = thread::spawn(move || {
+        runtime.run().expect("PeerReview runtime crashed");
     });
 
-    thread::sleep(Duration::from_secs(10));
+    // --- Build overlay membership ---
+    let nodes: Vec<NodeId> = (1..=num_nodes as NodeId).collect();
+    let overlay = build_trees(&nodes, 10);
 
-    // Application logic
-    thread::spawn(move || {
-        // Send a message
-        task_sender
-            .send(RuntimeTask::SendMessage {
-                dest: if config.node.id == 1 { 2 } else { 1 },
-                msg: "Hello, peer!".to_string(),
-            })
-            .unwrap();
+    let self_id = config.node.id;
 
-        // Wait a bit
-        thread::sleep(Duration::from_secs(5));
+    let mut overlay_node = OverlayNode::new(
+        self_id,
+        overlay.clone(),
+        runtime_tx,
+        app_rx,
+    );
 
-        // Shutdown
-        shutdown_sender.send(true).unwrap();
-    });
+    // --- Source behavior (node 1 only) ---
+    if self_id == 1 {
+        for chunk_id in 0..20 {
+            let tree = (chunk_id % 10) as usize;
 
-    // Wait for runtime to complete
-    runtime_handle.join().unwrap();
+            let payload = OverlayPayload::Chunk {
+                chunk_id,
+                tree,
+                data: "Hello".as_bytes().to_vec(),
+            };
 
-    Ok(())
+            for &child in overlay.children(tree, self_id) {
+                overlay_node.send_chunk(child, payload.clone());
+            }
+
+            thread::sleep(Duration::from_millis(500));
+            overlay_node.poll_peerreview();
+        }
+    }
+
+    // --- All nodes process incoming messages ---
+    loop {
+        overlay_node.poll_peerreview();
+        thread::sleep(Duration::from_millis(100));
+    }
 }

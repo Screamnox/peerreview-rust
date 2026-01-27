@@ -77,4 +77,4 @@ def generate_node_configs(num_nodes: int, base_port=5000, output_dir="nodes"):
     print(f"Generated {num_nodes} node configs and peers.toml in '{output_dir}'")
 
 if __name__ == "__main__":
-    generate_node_configs(4)
+    generate_node_configs(10)

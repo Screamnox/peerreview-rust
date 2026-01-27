@@ -16,7 +16,7 @@ def generate_compose(num_nodes=4, base_port=5000, image_name="peerreview_node", 
                 "context": "..",
                 "dockerfile": dockerfile
             },
-            "command": [f"nodes/node{node_id}.toml"],
+            "command": [f"nodes/node{node_id}/node{node_id}.toml", str(num_nodes)],
             "ports": [f"{base_port + node_id}:{base_port + node_id}"],
             "networks": ["peerreview_net"]
         }
@@ -28,5 +28,4 @@ def generate_compose(num_nodes=4, base_port=5000, image_name="peerreview_node", 
     print(f"Generated docker-compose.generated.yml with {num_nodes} nodes.")
 
 if __name__ == "__main__":
-    N = 4  # change to however many nodes you want
-    generate_compose(N)
+    generate_compose(10)
